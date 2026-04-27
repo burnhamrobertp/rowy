@@ -25,52 +25,111 @@ function pointEqual(a: Point, b: Point): boolean {
 }
 
 export interface Startbox {
-  poly: [Point, Point];
+  poly: Point[];
 }
 
 function startboxEqual(a: Startbox, b: Startbox): boolean {
-  return pointEqual(a.poly[0], b.poly[0]) && pointEqual(a.poly[1], b.poly[1]);
+  if (a.poly.length !== b.poly.length) return false;
+  return a.poly.every((p, i) => pointEqual(p, b.poly[i]));
 }
 
-function getStartboxString(startbox: Startbox): string {
-  return startbox.poly.map((point) => `${point.x} ${point.y}`).join(" ");
+// Legacy 2-point rectangle to 4-point polygon (for editor state only).
+function rectToPolygon(poly: [Point, Point]): Point[] {
+  const [tl, br] = poly;
+  return [
+    { x: tl.x, y: tl.y },
+    { x: br.x, y: tl.y },
+    { x: br.x, y: br.y },
+    { x: tl.x, y: br.y },
+  ];
 }
 
-function parseStartboxString(startboxString: string): Startbox {
-  const coords = startboxString
+function isLegacyRect(poly: Point[]): boolean {
+  return poly.length === 2;
+}
+
+// Convert polygon back to 2-point rectangle if it's an axis-aligned rect.
+function tryPolygonToRect(poly: Point[]): Point[] {
+  if (poly.length !== 4) return poly;
+  const xs = poly.map((p) => p.x).sort((a, b) => a - b);
+  const ys = poly.map((p) => p.y).sort((a, b) => a - b);
+  const isRect =
+    xs[0] === xs[1] && xs[2] === xs[3] && ys[0] === ys[1] && ys[2] === ys[3];
+  if (!isRect) return poly;
+  return [
+    { x: xs[0], y: ys[0] },
+    { x: xs[3], y: ys[3] },
+  ];
+}
+
+function getStartboxString(poly: Point[]): string {
+  return poly.map((p) => `${p.x} ${p.y}`).join(", ");
+}
+
+function parseStartboxString(startboxString: string): Point[] {
+  const parts = startboxString
     .trim()
-    .split(/ +/)
-    .map((field) => {
-      const val = parseInt(field, 10);
-      if (isNaN(val)) {
-        throw new Error(`'${field}' is not a number`);
-      }
-      if (val >= 0 && val <= 200) {
+    .split(/,/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  const points: Point[] = [];
+  for (const part of parts) {
+    const nums = part
+      .split(/ +/)
+      .map((field) => {
+        const val = parseInt(field, 10);
+        if (isNaN(val)) throw new Error(`'${field}' is not a number`);
+        if (val < 0 || val > 200) throw new Error(`${val} not in range 0-200`);
         return val;
-      }
-      throw new Error(`${val} not in range 0-200`);
-    });
-  if (coords.length !== 4) {
-    throw new Error(`must have 4 coords`);
+      });
+    if (nums.length !== 2) throw new Error(`expected 'x y' pair, got '${part}'`);
+    points.push({ x: nums[0], y: nums[1] });
   }
-  const box: Startbox = {
-    poly: [
-      { x: coords[0], y: coords[1] },
-      { x: coords[2], y: coords[3] },
-    ],
-  };
-  if (box.poly[0].x >= box.poly[1].x) {
-    throw new Error(`x₁ (${box.poly[0].x}) must be < x₂ (${box.poly[1].x})`);
+
+  if (points.length < 3) {
+    throw new Error(`need at least 3 vertices, got ${points.length}`);
   }
-  if (box.poly[0].y >= box.poly[1].y) {
-    throw new Error(`y₁ (${box.poly[0].y}) must be < y₂ (${box.poly[1].y})`);
-  }
-  return box;
+  return points;
 }
 
-// Clamps val between min and max
-function clamp(min: number, val: number, max: number): number {
-  return Math.min(Math.max(val, min), max);
+function clampPoint({ x, y }: Point): Point {
+  return {
+    x: Math.min(Math.max(Math.round(x), 0), 200),
+    y: Math.min(Math.max(Math.round(y), 0), 200),
+  };
+}
+
+function polygonCentroid(poly: Point[]): Point {
+  const n = poly.length;
+  let area = 0;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const cross = poly[i].x * poly[j].y - poly[j].x * poly[i].y;
+    area += cross;
+    cx += (poly[i].x + poly[j].x) * cross;
+    cy += (poly[i].y + poly[j].y) * cross;
+  }
+  area /= 2;
+  if (Math.abs(area) < 1e-6) {
+    // Degenerate — fall back to bounding box center.
+    const xs = poly.map((p) => p.x);
+    const ys = poly.map((p) => p.y);
+    return {
+      x: (Math.min(...xs) + Math.max(...xs)) / 2,
+      y: (Math.min(...ys) + Math.max(...ys)) / 2,
+    };
+  }
+  cx /= 6 * area;
+  cy /= 6 * area;
+  return { x: cx, y: cy };
+}
+
+// Midpoint of an edge between two vertices.
+function midpoint(a: Point, b: Point): Point {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
 // Immutable state object for single startbox
@@ -78,14 +137,14 @@ class StartboxState {
   public readonly str: string;
 
   constructor(
-    public readonly box: Startbox,
+    public readonly poly: Point[],
     str?: string,
     public readonly strErr?: string
   ) {
     if (str !== undefined) {
       this.str = str;
     } else {
-      this.str = getStartboxString(box);
+      this.str = getStartboxString(poly);
     }
   }
 
@@ -96,37 +155,35 @@ class StartboxState {
     try {
       return new StartboxState(parseStartboxString(str), str);
     } catch (e) {
-      return new StartboxState(this.box, str, (e as Error).message);
+      return new StartboxState(this.poly, str, (e as Error).message);
     }
   }
 
-  private clampTopLeft({ x, y }: Point): Point {
-    return {
-      x: clamp(0, Math.round(x), this.box.poly[1].x - 2),
-      y: clamp(0, Math.round(y), this.box.poly[1].y - 2),
-    };
+  setVertex(index: number, point: Point): StartboxState {
+    const clamped = clampPoint(point);
+    if (pointEqual(this.poly[index], clamped)) return this;
+    const newPoly = [...this.poly];
+    newPoly[index] = clamped;
+    return new StartboxState(newPoly);
   }
 
-  private clampBottomRight({ x, y }: Point): Point {
-    return {
-      x: clamp(this.box.poly[0].x + 2, Math.round(x), 200),
-      y: clamp(this.box.poly[0].y + 2, Math.round(y), 200),
-    };
+  insertVertex(afterIndex: number, point: Point): StartboxState {
+    const newPoly = [...this.poly];
+    newPoly.splice(afterIndex + 1, 0, clampPoint(point));
+    return new StartboxState(newPoly);
   }
 
-  setPoint(pointIndex: 0 | 1, point: Point): StartboxState {
-    const newBox: Startbox = {
-      poly: [...this.box.poly],
-    };
-    if (pointIndex === 0) {
-      newBox.poly[0] = this.clampTopLeft(point);
-    } else {
-      newBox.poly[1] = this.clampBottomRight(point);
-    }
-    if (startboxEqual(this.box, newBox)) {
-      return this;
-    }
-    return new StartboxState(newBox);
+  removeVertex(index: number): StartboxState {
+    if (this.poly.length <= 3) return this;
+    const newPoly = [...this.poly];
+    newPoly.splice(index, 1);
+    return new StartboxState(newPoly);
+  }
+
+  moveBy(dx: number, dy: number): StartboxState {
+    const moved = this.poly.map((p) => clampPoint({ x: p.x + dx, y: p.y + dy }));
+    if (this.poly.every((p, i) => pointEqual(p, moved[i]))) return this;
+    return new StartboxState(moved);
   }
 }
 
@@ -147,8 +204,8 @@ class StartboxesState {
     return new StartboxesState(newStartboxes);
   }
 
-  add(box: Startbox): StartboxesState {
-    return new StartboxesState([...this.boxes, new StartboxState(box)]);
+  add(poly: Point[]): StartboxesState {
+    return new StartboxesState([...this.boxes, new StartboxState(poly)]);
   }
 
   remove(idx: number): StartboxesState {
@@ -163,37 +220,54 @@ export interface MapStartboxProps {
   startboxes: Startbox[];
   updatedStartboxes?: (startboxes: Startbox[]) => void;
   editable?: boolean;
+  expandedLayout?: boolean;
 }
 
-const NEW_STARTBOX: Startbox = {
-  poly: [
-    { x: 50, y: 50 },
-    { x: 150, y: 150 },
-  ],
-};
+const NEW_POLYGON: Point[] = [
+  { x: 50, y: 50 },
+  { x: 150, y: 50 },
+  { x: 150, y: 150 },
+  { x: 50, y: 150 },
+];
+
+// Convert stored startbox data to editor polygon state.
+function loadPoly(box: Startbox): Point[] {
+  if (isLegacyRect(box.poly)) {
+    return rectToPolygon(box.poly as [Point, Point]);
+  }
+  return box.poly;
+}
+
+// Convert editor polygon state back to stored startbox data.
+// Preserves 2-point rectangle format when possible.
+function savePoly(poly: Point[]): Startbox {
+  return { poly: tryPolygonToRect(poly) };
+}
 
 export default function MapStartbox(props: MapStartboxProps) {
   const [dialogOpen, setDialogOpen] = useState<boolean>(false);
   const initStartboxes = props.startboxes || [];
   const [startboxes, setStartboxes] = useState<StartboxesState>(
-    new StartboxesState(initStartboxes.map((box) => new StartboxState(box)))
+    new StartboxesState(initStartboxes.map((box) => new StartboxState(loadPoly(box))))
   );
-  const selectedElement = useRef<{
-    startboxIndex: number;
-    pointIndex: 0 | 1;
-  } | null>(null);
+  const selectedElement = useRef<
+    | { type: "vertex"; startboxIndex: number; vertexIndex: number }
+    | { type: "move"; startboxIndex: number; origin: Point }
+    | null
+  >(null);
 
   const [deleteStartbox, setDeleteStartbox] = useState<boolean>(false);
+  const [deleteVertex, setDeleteVertex] = useState<boolean>(false);
 
   const changedStartbox =
     initStartboxes.length !== startboxes.boxes.length ||
     initStartboxes.some(
-      (box, idx) => !startboxEqual(box, startboxes.boxes[idx].box)
+      (box, idx) => !startboxEqual(savePoly(startboxes.boxes[idx].poly), box)
     );
 
   function saveStartboxes() {
     if (props.updatedStartboxes) {
-      props.updatedStartboxes(startboxes.boxes.map((sb) => sb.box));
+      props.updatedStartboxes(startboxes.boxes.map((sb) => savePoly(sb.poly)));
     }
   }
 
@@ -204,20 +278,37 @@ export default function MapStartbox(props: MapStartboxProps) {
     }
   }
 
-  function mouseMove(event: React.MouseEvent<SVGSVGElement, MouseEvent>) {
-    if (selectedElement.current === null) return;
-    event.preventDefault();
-    const svg = event.currentTarget;
+  function svgPoint(event: React.MouseEvent<SVGElement, MouseEvent>): Point {
+    const svg = event.currentTarget instanceof SVGSVGElement
+      ? event.currentTarget
+      : event.currentTarget.ownerSVGElement!;
     const ctm = svg.getScreenCTM()!;
-    const point = {
+    return {
       x: (event.clientX - ctm.e) / ctm.a,
       y: (event.clientY - ctm.f) / ctm.d,
     };
-    setStartboxes(
-      startboxes.update(selectedElement.current.startboxIndex, (sb) =>
-        sb.setPoint(selectedElement.current!.pointIndex, point)
-      )
-    );
+  }
+
+  function mouseMove(event: React.MouseEvent<SVGSVGElement, MouseEvent>) {
+    if (selectedElement.current === null) return;
+    event.preventDefault();
+    const point = svgPoint(event);
+    if (selectedElement.current.type === "vertex") {
+      setStartboxes(
+        startboxes.update(selectedElement.current.startboxIndex, (sb) =>
+          sb.setVertex((selectedElement.current as any).vertexIndex, point)
+        )
+      );
+    } else if (selectedElement.current.type === "move") {
+      const dx = point.x - selectedElement.current.origin.x;
+      const dy = point.y - selectedElement.current.origin.y;
+      setStartboxes(
+        startboxes.update(selectedElement.current.startboxIndex, (sb) =>
+          sb.moveBy(dx, dy)
+        )
+      );
+      selectedElement.current = { ...selectedElement.current, origin: point };
+    }
   }
 
   const [textureAspectRatio, setTextureAspectRatio] = useState<number>(0);
@@ -241,10 +332,6 @@ export default function MapStartbox(props: MapStartboxProps) {
   const mapView = (
     <>
       <div style={{ position: "absolute", width: "100%", height: "100%" }}>
-        {/* We add image here so that it's going to properly set the aspect ratio of the parent div
-          and then the SVG is instructed to just fill the full space. This trick allows for the
-          viewport coordinates in SVG to be always exactly 0 0 200 200 while maintaining the aspect
-          ratio of the map. */}
         <img
           src={props.textureUrl}
           style={{
@@ -282,7 +369,10 @@ export default function MapStartbox(props: MapStartboxProps) {
             selectedElement.current = null;
           }}
           onMouseMove={mouseMove}
-          onClick={() => setDeleteStartbox(false)}
+          onClick={() => {
+            setDeleteStartbox(false);
+            setDeleteVertex(false);
+          }}
         >
           <image
             width={200}
@@ -293,25 +383,31 @@ export default function MapStartbox(props: MapStartboxProps) {
             preserveAspectRatio="none"
           ></image>
           {startboxes.boxes.map((startbox, startboxIndex) => {
-            const [start, end] = startbox.box.poly;
-            const width = end.x - start.x;
-            const height = end.y - start.y;
+            const poly = startbox.poly;
+            const pointsStr = poly.map((p) => `${p.x},${p.y}`).join(" ");
+            const center = polygonCentroid(poly);
             return (
-              <g>
-                <rect
-                  x={start.x}
-                  y={start.y}
-                  width={width}
-                  height={height}
+              <g key={startboxIndex}>
+                <polygon
+                  points={pointsStr}
                   fill="rgba(255, 0, 0, 0.15)"
                   stroke="red"
                   strokeWidth="0.5"
-                  style={{ cursor: deleteStartbox ? "pointer" : "auto" }}
+                  style={{ cursor: deleteStartbox ? "pointer" : (props.editable ? "grab" : "auto") }}
                   onClick={() => maybeDeleteStartbox(startboxIndex)}
+                  onMouseDown={(e) => {
+                    if (deleteStartbox || deleteVertex || !props.editable) return;
+                    const origin = svgPoint(e);
+                    selectedElement.current = {
+                      type: "move",
+                      startboxIndex,
+                      origin,
+                    };
+                  }}
                 />
                 <text
-                  x={start.x + width / 2}
-                  y={start.y + height / 2}
+                  x={center.x}
+                  y={center.y}
                   textAnchor="middle"
                   dominantBaseline="middle"
                   fill="white"
@@ -319,23 +415,66 @@ export default function MapStartbox(props: MapStartboxProps) {
                 >
                   {startboxIndex + 1}
                 </text>
-                {props.editable &&
-                  startbox.box.poly.map((point, pointIndex) => (
-                    <circle
-                      key={pointIndex}
-                      cx={point.x}
-                      cy={point.y}
-                      fill="red"
-                      r="2"
-                      style={{ cursor: "nwse-resize" }}
-                      onMouseDown={(e) => {
-                        selectedElement.current = {
-                          startboxIndex,
-                          pointIndex: pointIndex as 0 | 1,
-                        };
-                      }}
-                    />
-                  ))}
+                {props.editable && (
+                  <>
+                    {/* Vertex drag handles */}
+                    {poly.map((point, vertexIndex) => (
+                      <circle
+                        key={`v${vertexIndex}`}
+                        cx={point.x}
+                        cy={point.y}
+                        fill={deleteVertex ? "#ff6666" : "red"}
+                        r="2.5"
+                        style={{ cursor: deleteVertex ? "pointer" : "move" }}
+                        onMouseDown={(e) => {
+                          if (deleteVertex) {
+                            e.stopPropagation();
+                            if (poly.length > 3) {
+                              setStartboxes(
+                                startboxes.update(startboxIndex, (sb) =>
+                                  sb.removeVertex(vertexIndex)
+                                )
+                              );
+                            }
+                            setDeleteVertex(false);
+                            return;
+                          }
+                          e.stopPropagation();
+                          selectedElement.current = {
+                            type: "vertex",
+                            startboxIndex,
+                            vertexIndex,
+                          };
+                        }}
+                      />
+                    ))}
+                    {/* Edge midpoint handles to insert vertices */}
+                    {poly.map((point, i) => {
+                      const next = poly[(i + 1) % poly.length];
+                      const mid = midpoint(point, next);
+                      return (
+                        <circle
+                          key={`m${i}`}
+                          cx={mid.x}
+                          cy={mid.y}
+                          fill="rgba(255, 255, 255, 0.6)"
+                          stroke="red"
+                          strokeWidth="0.3"
+                          r="1.5"
+                          style={{ cursor: "crosshair" }}
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            setStartboxes(
+                              startboxes.update(startboxIndex, (sb) =>
+                                sb.insertVertex(i, clampPoint(mid))
+                              )
+                            );
+                          }}
+                        />
+                      );
+                    })}
+                  </>
+                )}
               </g>
             );
           })}
@@ -356,7 +495,7 @@ export default function MapStartbox(props: MapStartboxProps) {
             <span>
               <IconButton
                 size="small"
-                onClick={() => setStartboxes(startboxes.add(NEW_STARTBOX))}
+                onClick={() => setStartboxes(startboxes.add(NEW_POLYGON))}
               >
                 <AddIcon />
               </IconButton>
@@ -367,9 +506,26 @@ export default function MapStartbox(props: MapStartboxProps) {
               <IconButton
                 size="small"
                 disabled={startboxes.boxes.length <= 1}
-                onClick={() => setDeleteStartbox(!deleteStartbox)}
+                onClick={() => {
+                  setDeleteStartbox(!deleteStartbox);
+                  setDeleteVertex(false);
+                }}
               >
                 <DeleteIcon />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title="Delete vertex (click a vertex to remove it)">
+            <span>
+              <IconButton
+                size="small"
+                color={deleteVertex ? "error" : "default"}
+                onClick={() => {
+                  setDeleteVertex(!deleteVertex);
+                  setDeleteStartbox(false);
+                }}
+              >
+                <DeleteIcon fontSize="small" />
               </IconButton>
             </span>
           </Tooltip>
@@ -397,16 +553,17 @@ export default function MapStartbox(props: MapStartboxProps) {
             </span>
           </Tooltip>
         </ButtonGroup>
-        <div style={{ flexGrow: 1, position: "relative", minHeight: "300px" }}>
+        <div style={{ flexGrow: 1, position: "relative", minHeight: props.expandedLayout ? "450px" : "300px" }}>
           {mapView}
         </div>
         <Stack direction="row" flexWrap="wrap" style={{ columnGap: "10px" }}>
           {startboxes.boxes.map((startbox, startboxIndex) => (
             <TextField
+              key={startboxIndex}
               value={startbox.str}
               size="small"
-              label={`${startboxIndex + 1}`}
-              style={{ width: "170px" }}
+              label={`${startboxIndex + 1} (${startbox.poly.length} pts)`}
+              style={{ width: "280px" }}
               onChange={(e) =>
                 setStartboxes(
                   startboxes.update(startboxIndex, (sb) =>
@@ -445,7 +602,11 @@ export default function MapStartbox(props: MapStartboxProps) {
       );
     } else {
       return (
-        <div style={{ padding: "20px", minWidth: "300px", maxWidth: "400px" }}>
+        <div style={{
+          padding: "20px",
+          minWidth: props.expandedLayout ? "500px" : "300px",
+          maxWidth: props.expandedLayout ? "700px" : "400px",
+        }}>
           {editorView}
         </div>
       );

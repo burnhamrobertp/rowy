@@ -37,6 +37,7 @@ import Derivative from "./Derivative";
 import Formula from "./Formula";
 import Markdown from "./Markdown";
 import MapStartbox from "./MapStartbox";
+import MapStartboxPolygon from "./MapStartboxPolygon";
 // // import Aggregate from "./Aggregate";
 import Status from "./Status";
 import CreatedBy from "./CreatedBy";
@@ -102,6 +103,7 @@ export const FIELDS: IFieldConfig[] = [
   Id,
   /** BAR Custom */
   MapStartbox,
+  MapStartboxPolygon,
 ];
 
 /**
