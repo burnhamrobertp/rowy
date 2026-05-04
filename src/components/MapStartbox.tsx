@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import DeleteIcon from "@mui/icons-material/Delete";
+import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
 import AddIcon from "@mui/icons-material/Add";
 import SaveAltIcon from "@mui/icons-material/SaveAlt";
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
@@ -13,15 +14,26 @@ import {
   DialogTitle,
   DialogContent,
   Stack,
+  Slider,
+  Typography,
+  Popover,
+  Button,
 } from "@mui/material";
 
 export interface Point {
   x: number;
   y: number;
+  /**
+   * Optional Catmull-Rom spline strength in [0, 1].
+   *   0 (default) = sharp polygon corner
+   *   1           = full smooth curve
+   * Per-edge tension is the average of the two endpoint anchor strengths.
+   */
+  strength?: number;
 }
 
 function pointEqual(a: Point, b: Point): boolean {
-  return a.x === b.x && a.y === b.y;
+  return a.x === b.x && a.y === b.y && (a.strength ?? 0) === (b.strength ?? 0);
 }
 
 export interface Startbox {
@@ -48,9 +60,11 @@ function isLegacyRect(poly: Point[]): boolean {
   return poly.length === 2;
 }
 
-// Convert polygon back to 2-point rectangle if it's an axis-aligned rect.
+// Convert polygon back to 2-point rectangle if it's an axis-aligned rect with
+// no per-anchor strengths (i.e. a plain polygon that happens to be a rectangle).
 function tryPolygonToRect(poly: Point[]): Point[] {
   if (poly.length !== 4) return poly;
+  if (poly.some((p) => (p.strength ?? 0) > 0)) return poly;
   const xs = poly.map((p) => p.x).sort((a, b) => a - b);
   const ys = poly.map((p) => p.y).sort((a, b) => a - b);
   const isRect =
@@ -62,8 +76,38 @@ function tryPolygonToRect(poly: Point[]): Point[] {
   ];
 }
 
+// Snap strength to step 0.025, with explicit snap-to-0 below half a step and
+// snap-to-1 above 1 - half a step so map makers don't accidentally keep tiny
+// non-zero strengths or near-1 strengths that aren't quite 1.
+//
+// We round in integer space (multiply, round, divide by the denominator) so
+// the result lands on an exact float value rather than something like
+// 0.30000000000000004 that would otherwise leak from `s / 0.025 * 0.025`.
+const STRENGTH_STEP = 0.025;
+const STRENGTH_DENOM = 40; // 1 / STRENGTH_STEP
+const STRENGTH_SNAP_EPSILON = STRENGTH_STEP / 2;
+function snapStrength(s: number): number {
+  if (!isFinite(s)) return 0;
+  if (s <= STRENGTH_SNAP_EPSILON) return 0;
+  if (s >= 1 - STRENGTH_SNAP_EPSILON) return 1;
+  const clamped = Math.min(Math.max(s, 0), 1);
+  return Math.round(clamped * STRENGTH_DENOM) / STRENGTH_DENOM;
+}
+
+function formatStrength(s: number): string {
+  // Display with up to 3 decimal places (matching the 0.025 step), dropping
+  // trailing zeros so 0.5 shows as "0.5", 0.025 shows as "0.025".
+  return Number(s.toFixed(3)).toString();
+}
+
 function getStartboxString(poly: Point[]): string {
-  return poly.map((p) => `${p.x} ${p.y}`).join(", ");
+  return poly
+    .map((p) => {
+      const s = p.strength ?? 0;
+      if (s <= 0) return `${p.x} ${p.y}`;
+      return `${p.x} ${p.y} ${formatStrength(s)}`;
+    })
+    .join(", ");
 }
 
 function parseStartboxString(startboxString: string): Point[] {
@@ -75,16 +119,28 @@ function parseStartboxString(startboxString: string): Point[] {
 
   const points: Point[] = [];
   for (const part of parts) {
-    const nums = part
-      .split(/ +/)
-      .map((field) => {
-        const val = parseInt(field, 10);
-        if (isNaN(val)) throw new Error(`'${field}' is not a number`);
-        if (val < 0 || val > 200) throw new Error(`${val} not in range 0-200`);
-        return val;
-      });
-    if (nums.length !== 2) throw new Error(`expected 'x y' pair, got '${part}'`);
-    points.push({ x: nums[0], y: nums[1] });
+    const tokens = part.split(/ +/);
+    if (tokens.length !== 2 && tokens.length !== 3) {
+      throw new Error(`expected 'x y' or 'x y strength', got '${part}'`);
+    }
+
+    const x = parseInt(tokens[0], 10);
+    const y = parseInt(tokens[1], 10);
+    if (isNaN(x)) throw new Error(`'${tokens[0]}' is not a number`);
+    if (isNaN(y)) throw new Error(`'${tokens[1]}' is not a number`);
+    if (x < 0 || x > 200) throw new Error(`x=${x} not in range 0-200`);
+    if (y < 0 || y > 200) throw new Error(`y=${y} not in range 0-200`);
+
+    const point: Point = { x, y };
+    if (tokens.length === 3) {
+      const sRaw = parseFloat(tokens[2]);
+      if (isNaN(sRaw)) throw new Error(`'${tokens[2]}' is not a number`);
+      if (sRaw < 0 || sRaw > 1)
+        throw new Error(`strength=${sRaw} not in range 0-1`);
+      const s = snapStrength(sRaw);
+      if (s > 0) point.strength = s;
+    }
+    points.push(point);
   }
 
   if (points.length < 3) {
@@ -93,11 +149,15 @@ function parseStartboxString(startboxString: string): Point[] {
   return points;
 }
 
-function clampPoint({ x, y }: Point): Point {
-  return {
-    x: Math.min(Math.max(Math.round(x), 0), 200),
-    y: Math.min(Math.max(Math.round(y), 0), 200),
+function clampPoint(p: Point): Point {
+  const out: Point = {
+    x: Math.min(Math.max(Math.round(p.x), 0), 200),
+    y: Math.min(Math.max(Math.round(p.y), 0), 200),
   };
+  if (p.strength !== undefined && p.strength > 0) {
+    out.strength = snapStrength(p.strength);
+  }
+  return out;
 }
 
 function polygonCentroid(poly: Point[]): Point {
@@ -127,9 +187,173 @@ function polygonCentroid(poly: Point[]): Point {
   return { x: cx, y: cy };
 }
 
-// Midpoint of an edge between two vertices.
-function midpoint(a: Point, b: Point): Point {
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+// On-curve midpoint of the edge from poly[i] to poly[(i+1) % N]. For a plain
+// (zero-tension) edge this collapses to the linear midpoint because
+// sampleSegment with tension=0 returns the linear interpolation; for a
+// splined edge it samples the same Catmull-Rom curve the renderer draws,
+// so the insert handle visually rides the rendered outline.
+function curveMidpoint(poly: Point[], i: number): Point {
+  const n = poly.length;
+  if (n < 2) return { x: poly[0]?.x ?? 0, y: poly[0]?.y ?? 0 };
+  const iPrev = (i - 1 + n) % n;
+  const iNext = (i + 1) % n;
+  const iNext2 = (iNext + 1) % n;
+  const p0 = poly[iPrev];
+  const p1 = poly[i];
+  const p2 = poly[iNext];
+  const p3 = poly[iNext2];
+  const s1 = clamp01(p1.strength ?? 0);
+  const s2 = clamp01(p2.strength ?? 0);
+  const edgeTension = clamp01((s1 + s2) * 0.5);
+  return sampleSegment(p0, p1, p2, p3, 0.5, edgeTension);
+}
+
+// Strength to give a vertex inserted on the edge from poly[i] to poly[i+1].
+// Average of the two endpoint strengths so adding a point in the middle of a
+// smooth edge keeps the curve smooth (rather than introducing a sharp corner
+// that would visually break the rendered shape).
+function insertionStrength(poly: Point[], i: number): number {
+  const s1 = poly[i].strength ?? 0;
+  const s2 = poly[(i + 1) % poly.length].strength ?? 0;
+  return snapStrength((s1 + s2) / 2);
+}
+
+// Choose MUI Popover origins so the strength popover projects outward from
+// the polygon — always toward the empty side of the vertex rather than over
+// the rest of the shape. The centroid→vertex vector is the most reliable
+// signal for "which way is outside" because it works for both convex and
+// concave polygons (a concave vertex's chord-midpoint can sit on the wrong
+// side of the boundary, but the centroid is always inside the bulk).
+type PopoverOrigin = {
+  vertical: "top" | "bottom";
+  horizontal: "left" | "right";
+};
+function popoverOriginsFor(
+  poly: Point[],
+  i: number
+): { anchorOrigin: PopoverOrigin; transformOrigin: PopoverOrigin } {
+  const here = poly[i];
+  const c = polygonCentroid(poly);
+  // Default to the bottom-right quadrant when the vertex coincides with the
+  // centroid (degenerate). dx >= 0 / dy >= 0 → right / bottom — i.e. popover
+  // extends down-right from the anchor, matching the prior fixed behavior.
+  const horizontal: "left" | "right" = here.x - c.x >= 0 ? "right" : "left";
+  const vertical: "top" | "bottom" = here.y - c.y >= 0 ? "bottom" : "top";
+  return {
+    anchorOrigin: { vertical, horizontal },
+    transformOrigin: {
+      vertical: vertical === "bottom" ? "top" : "bottom",
+      horizontal: horizontal === "right" ? "left" : "right",
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Catmull-Rom spline tessellation (1:1 port of bar-game/common/lib_spline.lua)
+// ---------------------------------------------------------------------------
+
+const TESSELLATION_SEGMENTS = 12;
+
+function clamp01(v: number): number {
+  if (v < 0) return 0;
+  if (v > 1) return 1;
+  return v;
+}
+
+// Sample a Catmull-Rom curve segment between p1 and p2 (with neighbours p0, p3),
+// blended toward the linear interpolation by `tension` in [0, 1].
+function sampleSegment(
+  p0: Point,
+  p1: Point,
+  p2: Point,
+  p3: Point,
+  t: number,
+  tension: number
+): Point {
+  const lx = p1.x + (p2.x - p1.x) * t;
+  const ly = p1.y + (p2.y - p1.y) * t;
+  if (tension <= 0) return { x: lx, y: ly };
+
+  const t2 = t * t;
+  const t3 = t2 * t;
+  const crX =
+    0.5 *
+    (2 * p1.x +
+      (-p0.x + p2.x) * t +
+      (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
+      (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+  const crY =
+    0.5 *
+    (2 * p1.y +
+      (-p0.y + p2.y) * t +
+      (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
+      (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+
+  if (tension >= 1) return { x: crX, y: crY };
+  return {
+    x: lx + (crX - lx) * tension,
+    y: ly + (crY - ly) * tension,
+  };
+}
+
+// Tessellate a closed ring of anchor points into a dense polygon. Anchors
+// without explicit strength are treated as sharp corners (strength 0); plain
+// polygons emerge with vertex-identical output.
+function tessellateRing(
+  anchors: Point[],
+  segments = TESSELLATION_SEGMENTS
+): Point[] {
+  const n = anchors.length;
+  if (n < 2) return anchors.map((p) => ({ x: p.x, y: p.y }));
+  const seg = Math.max(1, segments);
+
+  const out: Point[] = [];
+  for (let i = 0; i < n; i++) {
+    const iPrev = (i - 1 + n) % n;
+    const iNext = (i + 1) % n;
+    const iNext2 = (iNext + 1) % n;
+    const p0 = anchors[iPrev];
+    const p1 = anchors[i];
+    const p2 = anchors[iNext];
+    const p3 = anchors[iNext2];
+
+    const s1 = clamp01(p1.strength ?? 0);
+    const s2 = clamp01(p2.strength ?? 0);
+    const edgeTension = clamp01((s1 + s2) * 0.5);
+
+    out.push({ x: p1.x, y: p1.y });
+    if (edgeTension > 0 && n >= 3) {
+      for (let k = 1; k < seg; k++) {
+        out.push(sampleSegment(p0, p1, p2, p3, k / seg, edgeTension));
+      }
+    }
+  }
+  return out;
+}
+
+// SVG path for the (potentially curved) polygon outline. Plain polygons emit
+// a tessellation of length N (the anchors themselves) and look identical to
+// the previous straight-edged rendering.
+function tessellatedPathString(poly: Point[]): string {
+  const tess = tessellateRing(poly);
+  if (tess.length === 0) return "";
+  const parts: string[] = [`M ${tess[0].x} ${tess[0].y}`];
+  for (let i = 1; i < tess.length; i++) {
+    parts.push(`L ${tess[i].x} ${tess[i].y}`);
+  }
+  parts.push("Z");
+  return parts.join(" ");
+}
+
+// Color and radius for an anchor handle based on strength: a sharp corner
+// (0) is a small, dim red dot; max smoothness (1) is a brighter, larger dot.
+function strengthVisuals(strength: number): { fill: string; r: number } {
+  const s = clamp01(strength);
+  // Hue ramps from red (0°) toward orange/yellow (~50°) as strength rises.
+  const hue = 0 + 50 * s;
+  const sat = 80;
+  const lit = 45 + 10 * s;
+  return { fill: `hsl(${hue}, ${sat}%, ${lit}%)`, r: 2.2 + 1.0 * s };
 }
 
 // Immutable state object for single startbox
@@ -163,7 +387,37 @@ class StartboxState {
     const clamped = clampPoint(point);
     if (pointEqual(this.poly[index], clamped)) return this;
     const newPoly = [...this.poly];
+    // Preserve existing strength if not explicitly provided in `point`
+    if (
+      point.strength === undefined &&
+      this.poly[index].strength !== undefined
+    ) {
+      clamped.strength = this.poly[index].strength;
+    }
     newPoly[index] = clamped;
+    return new StartboxState(newPoly);
+  }
+
+  setVertexStrength(index: number, rawStrength: number): StartboxState {
+    const snapped = snapStrength(rawStrength);
+    const current = this.poly[index].strength ?? 0;
+    if (current === snapped) return this;
+    const newPoly = [...this.poly];
+    const updated: Point = { x: this.poly[index].x, y: this.poly[index].y };
+    if (snapped > 0) updated.strength = snapped;
+    newPoly[index] = updated;
+    return new StartboxState(newPoly);
+  }
+
+  setUniformStrength(rawStrength: number): StartboxState {
+    const snapped = snapStrength(rawStrength);
+    const same = this.poly.every((p) => (p.strength ?? 0) === snapped);
+    if (same) return this;
+    const newPoly = this.poly.map((p) => {
+      const out: Point = { x: p.x, y: p.y };
+      if (snapped > 0) out.strength = snapped;
+      return out;
+    });
     return new StartboxState(newPoly);
   }
 
@@ -181,7 +435,11 @@ class StartboxState {
   }
 
   moveBy(dx: number, dy: number): StartboxState {
-    const moved = this.poly.map((p) => clampPoint({ x: p.x + dx, y: p.y + dy }));
+    const moved = this.poly.map((p) => {
+      const moved = clampPoint({ x: p.x + dx, y: p.y + dy });
+      if (p.strength !== undefined) moved.strength = p.strength;
+      return moved;
+    });
     if (this.poly.every((p, i) => pointEqual(p, moved[i]))) return this;
     return new StartboxState(moved);
   }
@@ -239,16 +497,28 @@ function loadPoly(box: Startbox): Point[] {
 }
 
 // Convert editor polygon state back to stored startbox data.
-// Preserves 2-point rectangle format when possible.
+// Preserves 2-point rectangle format when possible (no strengths).
 function savePoly(poly: Point[]): Startbox {
   return { poly: tryPolygonToRect(poly) };
 }
+
+interface SelectedVertex {
+  startboxIndex: number;
+  vertexIndex: number;
+  anchorEl: SVGCircleElement;
+}
+
+// Pixel distance below which a mousedown/mouseup pair is treated as a click
+// (open the strength popover) rather than the start of a drag.
+const CLICK_DRAG_THRESHOLD = 3;
 
 export default function MapStartbox(props: MapStartboxProps) {
   const [dialogOpen, setDialogOpen] = useState<boolean>(false);
   const initStartboxes = props.startboxes || [];
   const [startboxes, setStartboxes] = useState<StartboxesState>(
-    new StartboxesState(initStartboxes.map((box) => new StartboxState(loadPoly(box))))
+    new StartboxesState(
+      initStartboxes.map((box) => new StartboxState(loadPoly(box)))
+    )
   );
   const selectedElement = useRef<
     | { type: "vertex"; startboxIndex: number; vertexIndex: number }
@@ -258,6 +528,31 @@ export default function MapStartbox(props: MapStartboxProps) {
 
   const [deleteStartbox, setDeleteStartbox] = useState<boolean>(false);
   const [deleteVertex, setDeleteVertex] = useState<boolean>(false);
+  const [selectedVertex, setSelectedVertex] = useState<SelectedVertex | null>(
+    null
+  );
+
+  // While a vertex is mouse-down'd we track the press as either a pending
+  // click or a confirmed drag. If the cursor moves more than CLICK_DRAG_THRESHOLD
+  // pixels before mouseup, the press becomes a drag and the popover stays
+  // closed; otherwise mouseup opens the strength popover anchored at the
+  // vertex's <circle>.
+  const pendingClick = useRef<{
+    startboxIndex: number;
+    vertexIndex: number;
+    anchorEl: SVGCircleElement;
+    clientX: number;
+    clientY: number;
+  } | null>(null);
+
+  // Clear selection if it points at a vertex that no longer exists
+  useEffect(() => {
+    if (selectedVertex === null) return;
+    const sb = startboxes.boxes[selectedVertex.startboxIndex];
+    if (!sb || selectedVertex.vertexIndex >= sb.poly.length) {
+      setSelectedVertex(null);
+    }
+  }, [startboxes, selectedVertex]);
 
   const changedStartbox =
     initStartboxes.length !== startboxes.boxes.length ||
@@ -279,9 +574,10 @@ export default function MapStartbox(props: MapStartboxProps) {
   }
 
   function svgPoint(event: React.MouseEvent<SVGElement, MouseEvent>): Point {
-    const svg = event.currentTarget instanceof SVGSVGElement
-      ? event.currentTarget
-      : event.currentTarget.ownerSVGElement!;
+    const svg =
+      event.currentTarget instanceof SVGSVGElement
+        ? event.currentTarget
+        : event.currentTarget.ownerSVGElement!;
     const ctm = svg.getScreenCTM()!;
     return {
       x: (event.clientX - ctm.e) / ctm.a,
@@ -290,6 +586,17 @@ export default function MapStartbox(props: MapStartboxProps) {
   }
 
   function mouseMove(event: React.MouseEvent<SVGSVGElement, MouseEvent>) {
+    // If the user moves the cursor beyond the click threshold while a vertex
+    // mouse-down is still pending, promote it to a drag and cancel the
+    // pending popover-open.
+    if (pendingClick.current !== null) {
+      const dx = event.clientX - pendingClick.current.clientX;
+      const dy = event.clientY - pendingClick.current.clientY;
+      if (dx * dx + dy * dy >= CLICK_DRAG_THRESHOLD * CLICK_DRAG_THRESHOLD) {
+        pendingClick.current = null;
+      }
+    }
+
     if (selectedElement.current === null) return;
     event.preventDefault();
     const point = svgPoint(event);
@@ -309,6 +616,20 @@ export default function MapStartbox(props: MapStartboxProps) {
       );
       selectedElement.current = { ...selectedElement.current, origin: point };
     }
+  }
+
+  function endInteraction() {
+    if (pendingClick.current !== null) {
+      // The press never moved — treat it as a click, open the popover.
+      const pc = pendingClick.current;
+      setSelectedVertex({
+        startboxIndex: pc.startboxIndex,
+        vertexIndex: pc.vertexIndex,
+        anchorEl: pc.anchorEl,
+      });
+      pendingClick.current = null;
+    }
+    selectedElement.current = null;
   }
 
   const [textureAspectRatio, setTextureAspectRatio] = useState<number>(0);
@@ -362,12 +683,8 @@ export default function MapStartbox(props: MapStartboxProps) {
               ? { width: "100%", maxHeight: "100%" }
               : { height: "100%", maxWidth: "100%" }),
           }}
-          onMouseLeave={() => {
-            selectedElement.current = null;
-          }}
-          onMouseUp={() => {
-            selectedElement.current = null;
-          }}
+          onMouseLeave={endInteraction}
+          onMouseUp={endInteraction}
           onMouseMove={mouseMove}
           onClick={() => {
             setDeleteStartbox(false);
@@ -384,19 +701,26 @@ export default function MapStartbox(props: MapStartboxProps) {
           ></image>
           {startboxes.boxes.map((startbox, startboxIndex) => {
             const poly = startbox.poly;
-            const pointsStr = poly.map((p) => `${p.x},${p.y}`).join(" ");
+            const pathStr = tessellatedPathString(poly);
             const center = polygonCentroid(poly);
             return (
               <g key={startboxIndex}>
-                <polygon
-                  points={pointsStr}
+                <path
+                  d={pathStr}
                   fill="rgba(255, 0, 0, 0.15)"
                   stroke="red"
                   strokeWidth="0.5"
-                  style={{ cursor: deleteStartbox ? "pointer" : (props.editable ? "grab" : "auto") }}
+                  style={{
+                    cursor: deleteStartbox
+                      ? "pointer"
+                      : props.editable
+                      ? "grab"
+                      : "auto",
+                  }}
                   onClick={() => maybeDeleteStartbox(startboxIndex)}
                   onMouseDown={(e) => {
-                    if (deleteStartbox || deleteVertex || !props.editable) return;
+                    if (deleteStartbox || deleteVertex || !props.editable)
+                      return;
                     const origin = svgPoint(e);
                     selectedElement.current = {
                       type: "move",
@@ -417,41 +741,83 @@ export default function MapStartbox(props: MapStartboxProps) {
                 </text>
                 {props.editable && (
                   <>
-                    {/* Vertex drag handles */}
-                    {poly.map((point, vertexIndex) => (
-                      <circle
-                        key={`v${vertexIndex}`}
-                        cx={point.x}
-                        cy={point.y}
-                        fill={deleteVertex ? "#ff6666" : "red"}
-                        r="2.5"
-                        style={{ cursor: deleteVertex ? "pointer" : "move" }}
-                        onMouseDown={(e) => {
-                          if (deleteVertex) {
-                            e.stopPropagation();
-                            if (poly.length > 3) {
-                              setStartboxes(
-                                startboxes.update(startboxIndex, (sb) =>
-                                  sb.removeVertex(vertexIndex)
-                                )
-                              );
-                            }
-                            setDeleteVertex(false);
-                            return;
-                          }
-                          e.stopPropagation();
-                          selectedElement.current = {
-                            type: "vertex",
-                            startboxIndex,
-                            vertexIndex,
-                          };
-                        }}
-                      />
-                    ))}
-                    {/* Edge midpoint handles to insert vertices */}
-                    {poly.map((point, i) => {
-                      const next = poly[(i + 1) % poly.length];
-                      const mid = midpoint(point, next);
+                    {/* Vertex drag handles, sized/coloured by strength */}
+                    {poly.map((point, vertexIndex) => {
+                      const s = point.strength ?? 0;
+                      const vis = deleteVertex
+                        ? { fill: "#ff6666", r: 2.5 }
+                        : strengthVisuals(s);
+                      const isSelected =
+                        selectedVertex !== null &&
+                        selectedVertex.startboxIndex === startboxIndex &&
+                        selectedVertex.vertexIndex === vertexIndex;
+                      return (
+                        <g key={`v${vertexIndex}`}>
+                          {isSelected && (
+                            <circle
+                              cx={point.x}
+                              cy={point.y}
+                              fill="none"
+                              stroke="white"
+                              strokeWidth="0.6"
+                              r={vis.r + 1.5}
+                              pointerEvents="none"
+                            />
+                          )}
+                          <circle
+                            cx={point.x}
+                            cy={point.y}
+                            fill={vis.fill}
+                            r={vis.r}
+                            style={{
+                              cursor: deleteVertex ? "pointer" : "move",
+                            }}
+                            onMouseDown={(e) => {
+                              if (deleteVertex) {
+                                e.stopPropagation();
+                                if (poly.length > 3) {
+                                  setStartboxes(
+                                    startboxes.update(startboxIndex, (sb) =>
+                                      sb.removeVertex(vertexIndex)
+                                    )
+                                  );
+                                }
+                                setDeleteVertex(false);
+                                return;
+                              }
+                              e.stopPropagation();
+                              pendingClick.current = {
+                                startboxIndex,
+                                vertexIndex,
+                                anchorEl: e.currentTarget,
+                                clientX: e.clientX,
+                                clientY: e.clientY,
+                              };
+                              selectedElement.current = {
+                                type: "vertex",
+                                startboxIndex,
+                                vertexIndex,
+                              };
+                            }}
+                          >
+                            <title>
+                              {`vertex ${
+                                vertexIndex + 1
+                              } — strength ${formatStrength(s)}`}
+                            </title>
+                          </circle>
+                        </g>
+                      );
+                    })}
+                    {/* Edge insert handles, riding the rendered curve. */}
+                    {poly.map((_, i) => {
+                      const mid = curveMidpoint(poly, i);
+                      const newStrength = insertionStrength(poly, i);
+                      const newPoint: Point = {
+                        x: mid.x,
+                        y: mid.y,
+                      };
+                      if (newStrength > 0) newPoint.strength = newStrength;
                       return (
                         <circle
                           key={`m${i}`}
@@ -466,7 +832,7 @@ export default function MapStartbox(props: MapStartboxProps) {
                             e.stopPropagation();
                             setStartboxes(
                               startboxes.update(startboxIndex, (sb) =>
-                                sb.insertVertex(i, clampPoint(mid))
+                                sb.insertVertex(i, newPoint)
                               )
                             );
                           }}
@@ -484,6 +850,19 @@ export default function MapStartbox(props: MapStartboxProps) {
   );
 
   if (props.editable) {
+    const selectedSb =
+      selectedVertex !== null
+        ? startboxes.boxes[selectedVertex.startboxIndex]
+        : null;
+    const selectedStrength =
+      selectedSb !== null
+        ? selectedSb.poly[selectedVertex!.vertexIndex].strength ?? 0
+        : 0;
+    const popoverOrigins =
+      selectedSb !== null
+        ? popoverOriginsFor(selectedSb.poly, selectedVertex!.vertexIndex)
+        : null;
+
     const editorView = (
       <>
         <ButtonGroup
@@ -515,7 +894,7 @@ export default function MapStartbox(props: MapStartboxProps) {
               </IconButton>
             </span>
           </Tooltip>
-          <Tooltip title="Delete vertex (click a vertex to remove it)">
+          <Tooltip title="Remove vertex (click a vertex to remove it)">
             <span>
               <IconButton
                 size="small"
@@ -525,7 +904,7 @@ export default function MapStartbox(props: MapStartboxProps) {
                   setDeleteStartbox(false);
                 }}
               >
-                <DeleteIcon fontSize="small" />
+                <RemoveCircleOutlineIcon />
               </IconButton>
             </span>
           </Tooltip>
@@ -553,9 +932,102 @@ export default function MapStartbox(props: MapStartboxProps) {
             </span>
           </Tooltip>
         </ButtonGroup>
-        <div style={{ flexGrow: 1, position: "relative", minHeight: props.expandedLayout ? "450px" : "300px" }}>
+        <div
+          style={{
+            flexGrow: 1,
+            position: "relative",
+            minHeight: props.expandedLayout ? "450px" : "300px",
+          }}
+        >
           {mapView}
         </div>
+
+        {/* Strength popover, anchored at the clicked vertex's <circle>.
+            Slider snaps to step 0.05 with explicit snap-to-0 below 0.025
+            and snap-to-1 above 0.975 so map makers can't accidentally store
+            strength=0.03 by nudging the slider. */}
+        <Popover
+          open={selectedVertex !== null && selectedSb !== null}
+          anchorEl={selectedVertex?.anchorEl ?? null}
+          onClose={() => setSelectedVertex(null)}
+          anchorOrigin={
+            popoverOrigins?.anchorOrigin ?? {
+              vertical: "bottom",
+              horizontal: "right",
+            }
+          }
+          transformOrigin={
+            popoverOrigins?.transformOrigin ?? {
+              vertical: "top",
+              horizontal: "left",
+            }
+          }
+          disableRestoreFocus
+          slotProps={{ paper: { sx: { p: 1.5, minWidth: 240 } } }}
+        >
+          {selectedVertex !== null && selectedSb !== null && (
+            <>
+              <Stack direction="column" spacing={1}>
+                <Typography variant="caption" color="text.secondary">
+                  {`Box ${selectedVertex.startboxIndex + 1} · vertex ${
+                    selectedVertex.vertexIndex + 1
+                  }`}
+                </Typography>
+                <Typography variant="body2">
+                  {`Strength: ${formatStrength(selectedStrength)}`}
+                </Typography>
+                <Slider
+                  value={selectedStrength}
+                  min={0}
+                  max={1}
+                  step={STRENGTH_STEP}
+                  marks={[
+                    { value: 0, label: "0" },
+                    { value: 0.5, label: "0.5" },
+                    { value: 1, label: "1" },
+                  ]}
+                  onChange={(_, raw) => {
+                    const v = Array.isArray(raw) ? raw[0] : raw;
+                    setStartboxes(
+                      startboxes.update(selectedVertex.startboxIndex, (sb) =>
+                        sb.setVertexStrength(
+                          selectedVertex.vertexIndex,
+                          v as number
+                        )
+                      )
+                    );
+                  }}
+                  valueLabelDisplay="auto"
+                  valueLabelFormat={(v) => formatStrength(snapStrength(v))}
+                  // Pull the absolutely-positioned mark labels (0, 0.5, 1)
+                  // closer to the track so they fit inside the popover's
+                  // content flow. Default is 30px; 23px tucks them right
+                  // beneath the track without overlapping the thumb area.
+                  sx={{ "& .MuiSlider-markLabel": { top: "23px" } }}
+                />
+              </Stack>
+              {/* Button is a sibling of (not a child of) the Stack so the
+                  Stack's auto-injected margin-top rule (which has higher
+                  CSS specificity than the sx prop on a child) doesn't
+                  override the spacing we want here. */}
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => {
+                  setStartboxes(
+                    startboxes.update(selectedVertex.startboxIndex, (sb) =>
+                      sb.setUniformStrength(selectedStrength)
+                    )
+                  );
+                }}
+                sx={{ mt: "24px" }}
+              >
+                Apply to whole startbox
+              </Button>
+            </>
+          )}
+        </Popover>
+
         <Stack direction="row" flexWrap="wrap" style={{ columnGap: "10px" }}>
           {startboxes.boxes.map((startbox, startboxIndex) => (
             <TextField
@@ -602,11 +1074,13 @@ export default function MapStartbox(props: MapStartboxProps) {
       );
     } else {
       return (
-        <div style={{
-          padding: "20px",
-          minWidth: props.expandedLayout ? "500px" : "300px",
-          maxWidth: props.expandedLayout ? "700px" : "400px",
-        }}>
+        <div
+          style={{
+            padding: "20px",
+            minWidth: props.expandedLayout ? "500px" : "300px",
+            maxWidth: props.expandedLayout ? "700px" : "400px",
+          }}
+        >
           {editorView}
         </div>
       );
