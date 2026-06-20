@@ -510,7 +510,6 @@ export interface MapStartboxProps {
   startboxes: Startbox[];
   updatedStartboxes?: (startboxes: Startbox[]) => void;
   editable?: boolean;
-  expandedLayout?: boolean;
 }
 
 const NEW_POLYGON: Point[] = [
@@ -968,7 +967,7 @@ export default function MapStartbox(props: MapStartboxProps) {
           style={{
             flexGrow: 1,
             position: "relative",
-            minHeight: props.expandedLayout ? "450px" : "300px",
+            minHeight: "450px",
           }}
         >
           {mapView}
@@ -995,7 +994,7 @@ export default function MapStartbox(props: MapStartboxProps) {
             }
           }
           disableRestoreFocus
-          slotProps={{ paper: { sx: { p: 1.5, minWidth: 240 } } }}
+          PaperProps={{ sx: { p: 1.5, minWidth: 240 } }}
         >
           {selectedVertex !== null && selectedSb !== null && (
             <>
@@ -1109,8 +1108,8 @@ export default function MapStartbox(props: MapStartboxProps) {
         <div
           style={{
             padding: "20px",
-            minWidth: props.expandedLayout ? "500px" : "300px",
-            maxWidth: props.expandedLayout ? "700px" : "400px",
+            minWidth: "500px",
+            maxWidth: "700px",
           }}
         >
           {editorView}
