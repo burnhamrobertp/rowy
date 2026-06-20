@@ -23,11 +23,11 @@ import {
 import {
   Point,
   Startbox,
-  NEW_POLYGON,
   STRENGTH_STEP,
   snapStrength,
   formatStrength,
   startboxEqual,
+  isRectangle,
   polygonCentroid,
   curveMidpoint,
   insertionStrength,
@@ -37,6 +37,8 @@ import {
 } from "./startbox/geometry";
 import { loadPoly, savePoly } from "./startbox/serialization";
 import { StartboxState, StartboxesState } from "./startbox/state";
+import { useStartboxDraw } from "./startbox/useStartboxDraw";
+import CreateStartboxMenu from "./startbox/CreateStartboxMenu";
 
 export type { Startbox } from "./startbox/geometry";
 
@@ -71,6 +73,11 @@ export default function MapStartbox(props: MapStartboxProps) {
     | null
   >(null);
 
+  const draw = useStartboxDraw((poly) =>
+    setStartboxes((prev) => prev.add(poly))
+  );
+  const [createAnchor, setCreateAnchor] = useState<HTMLElement | null>(null);
+
   const [deleteStartbox, setDeleteStartbox] = useState<boolean>(false);
   const [deleteVertex, setDeleteVertex] = useState<boolean>(false);
   const [selectedVertex, setSelectedVertex] = useState<SelectedVertex | null>(
@@ -98,6 +105,17 @@ export default function MapStartbox(props: MapStartboxProps) {
       setSelectedVertex(null);
     }
   }, [startboxes, selectedVertex]);
+
+  // While drawing, Escape cancels and Enter commits the in-progress shape.
+  useEffect(() => {
+    if (draw.mode === null) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") draw.cancel();
+      else if (e.key === "Enter") draw.commit();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [draw]);
 
   const changedStartbox =
     initStartboxes.length !== startboxes.boxes.length ||
@@ -146,9 +164,13 @@ export default function MapStartbox(props: MapStartboxProps) {
     event.preventDefault();
     const point = svgPoint(event);
     if (selectedElement.current.type === "vertex") {
+      const vertexIndex = (selectedElement.current as any).vertexIndex;
+      const sbIndex = selectedElement.current.startboxIndex;
       setStartboxes(
-        startboxes.update(selectedElement.current.startboxIndex, (sb) =>
-          sb.setVertex((selectedElement.current as any).vertexIndex, point)
+        startboxes.update(sbIndex, (sb) =>
+          isRectangle(sb.poly)
+            ? sb.resizeRectCorner(vertexIndex, point)
+            : sb.setVertex(vertexIndex, point)
         )
       );
     } else if (selectedElement.current.type === "move") {
@@ -227,10 +249,23 @@ export default function MapStartbox(props: MapStartboxProps) {
             ...(textureAspectRatio > imageElementAspectRatio
               ? { width: "100%", maxHeight: "100%" }
               : { height: "100%", maxWidth: "100%" }),
+            ...(draw.mode ? { cursor: "crosshair" } : {}),
           }}
           onMouseLeave={endInteraction}
-          onMouseUp={endInteraction}
-          onMouseMove={mouseMove}
+          onMouseDown={(e) => {
+            if (draw.mode) {
+              e.preventDefault();
+              draw.onMouseDown(svgPoint(e));
+            }
+          }}
+          onMouseUp={(e) => {
+            if (draw.mode) draw.onMouseUp(svgPoint(e));
+            else endInteraction();
+          }}
+          onMouseMove={(e) => {
+            if (draw.mode) draw.onMouseMove(svgPoint(e));
+            else mouseMove(e);
+          }}
           onClick={() => {
             setDeleteStartbox(false);
             setDeleteVertex(false);
@@ -244,151 +279,195 @@ export default function MapStartbox(props: MapStartboxProps) {
             href={props.textureUrl}
             preserveAspectRatio="none"
           ></image>
-          {startboxes.boxes.map((startbox, startboxIndex) => {
-            const poly = startbox.poly;
-            const pathStr = tessellatedPathString(poly);
-            const center = polygonCentroid(poly);
-            return (
-              <g key={startboxIndex}>
-                <path
-                  d={pathStr}
-                  fill="rgba(255, 0, 0, 0.15)"
-                  stroke="red"
-                  strokeWidth="0.5"
-                  style={{
-                    cursor: deleteStartbox
-                      ? "pointer"
-                      : props.editable
-                      ? "grab"
-                      : "auto",
-                  }}
-                  onClick={() => maybeDeleteStartbox(startboxIndex)}
-                  onMouseDown={(e) => {
-                    if (deleteStartbox || deleteVertex || !props.editable)
-                      return;
-                    const origin = svgPoint(e);
-                    selectedElement.current = {
-                      type: "move",
-                      startboxIndex,
-                      origin,
-                    };
-                  }}
-                />
-                <text
-                  x={center.x}
-                  y={center.y}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  fill="white"
-                  fontSize="12px"
-                >
-                  {startboxIndex + 1}
-                </text>
-                {props.editable && (
-                  <>
-                    {/* Vertex drag handles, sized/coloured by strength */}
-                    {poly.map((point, vertexIndex) => {
-                      const s = point.strength ?? 0;
-                      const vis = deleteVertex
-                        ? { fill: "#ff6666", r: 2.5 }
-                        : strengthVisuals(s);
-                      const isSelected =
-                        selectedVertex !== null &&
-                        selectedVertex.startboxIndex === startboxIndex &&
-                        selectedVertex.vertexIndex === vertexIndex;
-                      return (
-                        <g key={`v${vertexIndex}`}>
-                          {isSelected && (
+          <g style={{ pointerEvents: draw.mode ? "none" : undefined }}>
+            {startboxes.boxes.map((startbox, startboxIndex) => {
+              const poly = startbox.poly;
+              const pathStr = tessellatedPathString(poly);
+              const center = polygonCentroid(poly);
+              return (
+                <g key={startboxIndex}>
+                  <path
+                    d={pathStr}
+                    fill="rgba(255, 0, 0, 0.15)"
+                    stroke="red"
+                    strokeWidth="0.5"
+                    style={{
+                      cursor: deleteStartbox
+                        ? "pointer"
+                        : props.editable
+                        ? "grab"
+                        : "auto",
+                    }}
+                    onClick={() => maybeDeleteStartbox(startboxIndex)}
+                    onMouseDown={(e) => {
+                      if (deleteStartbox || deleteVertex || !props.editable)
+                        return;
+                      const origin = svgPoint(e);
+                      selectedElement.current = {
+                        type: "move",
+                        startboxIndex,
+                        origin,
+                      };
+                    }}
+                  />
+                  <text
+                    x={center.x}
+                    y={center.y}
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fill="white"
+                    fontSize="12px"
+                  >
+                    {startboxIndex + 1}
+                  </text>
+                  {props.editable && (
+                    <>
+                      {/* Vertex drag handles, sized/coloured by strength */}
+                      {poly.map((point, vertexIndex) => {
+                        const s = point.strength ?? 0;
+                        const vis = deleteVertex
+                          ? { fill: "#ff6666", r: 2.5 }
+                          : strengthVisuals(s);
+                        const isSelected =
+                          selectedVertex !== null &&
+                          selectedVertex.startboxIndex === startboxIndex &&
+                          selectedVertex.vertexIndex === vertexIndex;
+                        return (
+                          <g key={`v${vertexIndex}`}>
+                            {isSelected && (
+                              <circle
+                                cx={point.x}
+                                cy={point.y}
+                                fill="none"
+                                stroke="white"
+                                strokeWidth="0.6"
+                                r={vis.r + 1.5}
+                                pointerEvents="none"
+                              />
+                            )}
                             <circle
                               cx={point.x}
                               cy={point.y}
-                              fill="none"
-                              stroke="white"
-                              strokeWidth="0.6"
-                              r={vis.r + 1.5}
-                              pointerEvents="none"
-                            />
-                          )}
-                          <circle
-                            cx={point.x}
-                            cy={point.y}
-                            fill={vis.fill}
-                            r={vis.r}
-                            style={{
-                              cursor: deleteVertex ? "pointer" : "move",
-                            }}
-                            onMouseDown={(e) => {
-                              if (deleteVertex) {
-                                e.stopPropagation();
-                                if (poly.length > 3) {
-                                  setStartboxes(
-                                    startboxes.update(startboxIndex, (sb) =>
-                                      sb.removeVertex(vertexIndex)
-                                    )
-                                  );
+                              fill={vis.fill}
+                              r={vis.r}
+                              style={{
+                                cursor: deleteVertex ? "pointer" : "move",
+                              }}
+                              onMouseDown={(e) => {
+                                if (deleteVertex) {
+                                  e.stopPropagation();
+                                  if (poly.length > 3) {
+                                    setStartboxes(
+                                      startboxes.update(startboxIndex, (sb) =>
+                                        sb.removeVertex(vertexIndex)
+                                      )
+                                    );
+                                  }
+                                  setDeleteVertex(false);
+                                  return;
                                 }
-                                setDeleteVertex(false);
-                                return;
-                              }
+                                e.stopPropagation();
+                                pendingClick.current = {
+                                  startboxIndex,
+                                  vertexIndex,
+                                  anchorEl: e.currentTarget,
+                                  clientX: e.clientX,
+                                  clientY: e.clientY,
+                                };
+                                selectedElement.current = {
+                                  type: "vertex",
+                                  startboxIndex,
+                                  vertexIndex,
+                                };
+                              }}
+                            >
+                              <title>
+                                {`vertex ${
+                                  vertexIndex + 1
+                                } — strength ${formatStrength(s)}`}
+                              </title>
+                            </circle>
+                          </g>
+                        );
+                      })}
+                      {/* Edge insert handles, riding the rendered curve. */}
+                      {poly.map((_, i) => {
+                        const mid = curveMidpoint(poly, i);
+                        const newStrength = insertionStrength(poly, i);
+                        const newPoint: Point = {
+                          x: mid.x,
+                          y: mid.y,
+                        };
+                        if (newStrength > 0) newPoint.strength = newStrength;
+                        return (
+                          <circle
+                            key={`m${i}`}
+                            cx={mid.x}
+                            cy={mid.y}
+                            fill="rgba(255, 255, 255, 0.6)"
+                            stroke="red"
+                            strokeWidth="0.3"
+                            r="1.5"
+                            style={{ cursor: "crosshair" }}
+                            onMouseDown={(e) => {
                               e.stopPropagation();
-                              pendingClick.current = {
-                                startboxIndex,
-                                vertexIndex,
-                                anchorEl: e.currentTarget,
-                                clientX: e.clientX,
-                                clientY: e.clientY,
-                              };
-                              selectedElement.current = {
-                                type: "vertex",
-                                startboxIndex,
-                                vertexIndex,
-                              };
+                              setStartboxes(
+                                startboxes.update(startboxIndex, (sb) =>
+                                  sb.insertVertex(i, newPoint)
+                                )
+                              );
                             }}
-                          >
-                            <title>
-                              {`vertex ${
-                                vertexIndex + 1
-                              } — strength ${formatStrength(s)}`}
-                            </title>
-                          </circle>
-                        </g>
-                      );
-                    })}
-                    {/* Edge insert handles, riding the rendered curve. */}
-                    {poly.map((_, i) => {
-                      const mid = curveMidpoint(poly, i);
-                      const newStrength = insertionStrength(poly, i);
-                      const newPoint: Point = {
-                        x: mid.x,
-                        y: mid.y,
-                      };
-                      if (newStrength > 0) newPoint.strength = newStrength;
-                      return (
-                        <circle
-                          key={`m${i}`}
-                          cx={mid.x}
-                          cy={mid.y}
-                          fill="rgba(255, 255, 255, 0.6)"
-                          stroke="red"
-                          strokeWidth="0.3"
-                          r="1.5"
-                          style={{ cursor: "crosshair" }}
-                          onMouseDown={(e) => {
-                            e.stopPropagation();
-                            setStartboxes(
-                              startboxes.update(startboxIndex, (sb) =>
-                                sb.insertVertex(i, newPoint)
-                              )
-                            );
-                          }}
-                        />
-                      );
-                    })}
-                  </>
-                )}
-              </g>
-            );
-          })}
+                          />
+                        );
+                      })}
+                    </>
+                  )}
+                </g>
+              );
+            })}
+          </g>
+          {draw.preview && (
+            <g style={{ pointerEvents: "none" }}>
+              {draw.preview.closed ? (
+                <polygon
+                  points={draw.preview.points
+                    .map((p) => `${p.x},${p.y}`)
+                    .join(" ")}
+                  fill="rgba(0, 150, 255, 0.12)"
+                  stroke="deepskyblue"
+                  strokeWidth="0.7"
+                  strokeDasharray="2 2"
+                />
+              ) : (
+                <polyline
+                  points={draw.preview.points
+                    .map((p) => `${p.x},${p.y}`)
+                    .join(" ")}
+                  fill="none"
+                  stroke="deepskyblue"
+                  strokeWidth="0.7"
+                  strokeDasharray="2 2"
+                />
+              )}
+              {draw.preview.points.map((p, i) => (
+                <circle
+                  key={`dp${i}`}
+                  cx={p.x}
+                  cy={p.y}
+                  r={!draw.preview!.closed && i === 0 ? 2.2 : 1}
+                  fill={
+                    !draw.preview!.closed && i === 0
+                      ? "rgba(0, 150, 255, 0.4)"
+                      : "deepskyblue"
+                  }
+                  stroke={
+                    !draw.preview!.closed && i === 0 ? "deepskyblue" : "none"
+                  }
+                  strokeWidth="0.5"
+                />
+              ))}
+            </g>
+          )}
         </svg>
       </div>
     </>
@@ -419,7 +498,7 @@ export default function MapStartbox(props: MapStartboxProps) {
             <span>
               <IconButton
                 size="small"
-                onClick={() => setStartboxes(startboxes.add(NEW_POLYGON))}
+                onClick={(e) => setCreateAnchor(e.currentTarget)}
               >
                 <AddIcon />
               </IconButton>
@@ -477,6 +556,12 @@ export default function MapStartbox(props: MapStartboxProps) {
             </span>
           </Tooltip>
         </ButtonGroup>
+        <CreateStartboxMenu
+          anchorEl={createAnchor}
+          open={Boolean(createAnchor)}
+          onClose={() => setCreateAnchor(null)}
+          onSelect={(m) => draw.start(m)}
+        />
         <div
           style={{
             flexGrow: 1,

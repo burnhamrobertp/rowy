@@ -43,6 +43,24 @@ export class StartboxState {
     return new StartboxState(newPoly);
   }
 
+  // Resize a rectangle by dragging one corner: the corner moves to `point` and
+  // the two adjacent corners track its shared edges, keeping the box axis-aligned.
+  // Callers gate on isRectangle; falls back to setVertex for non-4-point shapes.
+  resizeRectCorner(index: number, point: Point): StartboxState {
+    if (this.poly.length !== 4) return this.setVertex(index, point);
+    const clamped = clampPoint(point);
+    const corner = this.poly[index];
+    const newPoly = this.poly.map((p, j) => {
+      if (j === index) return { x: clamped.x, y: clamped.y };
+      return {
+        x: p.x === corner.x ? clamped.x : p.x,
+        y: p.y === corner.y ? clamped.y : p.y,
+      };
+    });
+    if (this.poly.every((p, i) => pointEqual(p, newPoly[i]))) return this;
+    return new StartboxState(newPoly);
+  }
+
   setVertexStrength(index: number, rawStrength: number): StartboxState {
     const snapped = snapStrength(rawStrength);
     const current = this.poly[index].strength ?? 0;
