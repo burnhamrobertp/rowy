@@ -44,6 +44,7 @@ import CreatedAt from "./CreatedAt";
 import UpdatedAt from "./UpdatedAt";
 import User from "./User";
 import Id from "./Id";
+import MapStartPos from "./MapStartPos";
 import { ColumnConfig } from "@src/types/table";
 
 // Export field configs in order for FieldsDropdown
@@ -99,6 +100,8 @@ export const FIELDS: IFieldConfig[] = [
   /** METADATA */
   User,
   Id,
+  /** BAR Custom */
+  MapStartPos,
 ];
 
 /**
