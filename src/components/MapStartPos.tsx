@@ -114,6 +114,10 @@ export default function MapStartPos(props: MapStartPosProps) {
 
   const positionNames = Object.keys(state.positions);
   const errors = validateStartPos(state.toStartPos());
+  const outOfBounds = positionNames.filter((n) => {
+    const p = state.positions[n];
+    return p.x < 0 || p.x > W || p.y < 0 || p.y > H;
+  });
 
   const team = state.team;
   const activeConfig = configIdx < team.length ? configIdx : 0;
@@ -265,8 +269,16 @@ export default function MapStartPos(props: MapStartPosProps) {
         const p = state.positions[name];
         const use = spawnUse.get(name);
         const isSelected = selected?.name === name;
+
+        // A position outside the map bounds would render off-canvas and be
+        // unreachable, so pin it to the nearest edge (flagged) while the modal
+        // and stored value keep the true coords for correction.
+        const oob = p.x < 0 || p.x > W || p.y < 0 || p.y > H;
+        const d = oob ? clampToBounds(p, dimensions) : p;
         const color = deleteMode
           ? "#e53935"
+          : oob
+          ? "#ff5252"
           : use
           ? SIDE_COLORS[use.sideIdx % SIDE_COLORS.length]
           : "#8a93a3";
@@ -277,12 +289,13 @@ export default function MapStartPos(props: MapStartPosProps) {
         return (
           <g key={name}>
             <circle
-              cx={p.x}
-              cy={p.y}
+              cx={d.x}
+              cy={d.y}
               r={R}
               fill={rgba(color, 0.28)}
               stroke={isSelected ? "#ffffff" : color}
-              strokeWidth={isSelected ? R * 0.11 : R * 0.06}
+              strokeWidth={isSelected ? R * 0.11 : R * 0.07}
+              strokeDasharray={oob ? `${R * 0.22} ${R * 0.16}` : undefined}
               style={{
                 cursor: deleteMode
                   ? "pointer"
@@ -307,11 +320,13 @@ export default function MapStartPos(props: MapStartPosProps) {
                 };
               }}
             >
-              <title>{name}</title>
+              <title>
+                {oob ? `${name} - off map at (${p.x}, ${p.y})` : name}
+              </title>
             </circle>
             <text
-              x={p.x}
-              y={use?.role ? p.y - LABEL_SIZE * 0.6 : p.y}
+              x={d.x}
+              y={use?.role ? d.y - LABEL_SIZE * 0.6 : d.y}
               textAnchor="middle"
               dominantBaseline="central"
               fill="#ffffff"
@@ -326,8 +341,8 @@ export default function MapStartPos(props: MapStartPosProps) {
             </text>
             {use?.role && (
               <text
-                x={p.x}
-                y={p.y + LABEL_SIZE * 0.6}
+                x={d.x}
+                y={d.y + LABEL_SIZE * 0.6}
                 textAnchor="middle"
                 dominantBaseline="central"
                 fill="#ffd54f"
@@ -557,6 +572,14 @@ export default function MapStartPos(props: MapStartPosProps) {
           />
         )}
       </Popover>
+
+      {outOfBounds.length > 0 && (
+        <Alert severity="warning">
+          {outOfBounds.length} position(s) lie outside the map and are pinned to
+          the edge (red, dashed): {outOfBounds.join(", ")}. Click one to correct
+          its coordinates.
+        </Alert>
+      )}
 
       {errors.length > 0 && (
         <Alert severity="warning" sx={{ "& ul": { m: 0, pl: 2 } }}>
