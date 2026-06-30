@@ -32,7 +32,7 @@ export function useMapMeta(
     if (!firebaseDb) return;
 
     const parent = column.config?.mapTextureParentTable || 0;
-    const urlField = column.config?.mapTextureUrlPath || "image";
+    const urlField = column.config?.mapTextureUrlPath || "startboxTextureUrl";
     const dimField = column.config?.mapDimensionsPath || "dimensions";
     // parent counts how many tables up the texture row lives; 0 = this row.
     const segments = _rowy_ref.path.split("/");
