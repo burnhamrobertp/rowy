@@ -1,5 +1,19 @@
-import { Point, clampPoint, pointEqual, snapStrength } from "./geometry";
+import {
+  Point,
+  MIN_BOX_SIZE,
+  clampPoint,
+  pointEqual,
+  snapStrength,
+} from "./geometry";
 import { getStartboxString, parseStartboxString } from "./serialization";
+
+// Keep a dragged rect corner on its side of the fixed opposite corner, at least
+// MIN_BOX_SIZE away and within 0-200, so the box can't collapse to a line.
+function clampRectCorner(v: number, opposite: number, above: boolean): number {
+  return above
+    ? Math.min(Math.max(v, opposite + MIN_BOX_SIZE), 200)
+    : Math.max(Math.min(v, opposite - MIN_BOX_SIZE), 0);
+}
 
 // Immutable state object for single startbox
 export class StartboxState {
@@ -50,11 +64,15 @@ export class StartboxState {
     if (this.poly.length !== 4) return this.setVertex(index, point);
     const clamped = clampPoint(point);
     const corner = this.poly[index];
+    const opposite =
+      this.poly.find((p) => p.x !== corner.x && p.y !== corner.y) ?? corner;
+    const x = clampRectCorner(clamped.x, opposite.x, corner.x >= opposite.x);
+    const y = clampRectCorner(clamped.y, opposite.y, corner.y >= opposite.y);
     const newPoly = this.poly.map((p, j) => {
-      if (j === index) return { x: clamped.x, y: clamped.y };
+      if (j === index) return { x, y };
       return {
-        x: p.x === corner.x ? clamped.x : p.x,
-        y: p.y === corner.y ? clamped.y : p.y,
+        x: p.x === corner.x ? x : p.x,
+        y: p.y === corner.y ? y : p.y,
       };
     });
     if (this.poly.every((p, i) => pointEqual(p, newPoly[i]))) return this;

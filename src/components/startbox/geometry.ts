@@ -25,6 +25,10 @@ export const NEW_POLYGON: Point[] = [
   { x: 50, y: 150 },
 ];
 
+// Minimum width/height in the 0-200 space, enforced on rect-corner drags and on
+// text-field parse so a box can't collapse to a zero-area line or point.
+export const MIN_BOX_SIZE = 2;
+
 export function startboxEqual(a: Startbox, b: Startbox): boolean {
   if (a.poly.length !== b.poly.length) return false;
   return a.poly.every((p, i) => pointEqual(p, b.poly[i]));

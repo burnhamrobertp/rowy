@@ -1,6 +1,7 @@
 import {
   Point,
   Startbox,
+  MIN_BOX_SIZE,
   snapStrength,
   formatStrength,
   isLegacyRect,
@@ -54,6 +55,18 @@ export function parseStartboxString(startboxString: string): Point[] {
   if (points.length < 3) {
     throw new Error(`need at least 3 vertices, got ${points.length}`);
   }
+
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  if (
+    Math.max(...xs) - Math.min(...xs) < MIN_BOX_SIZE ||
+    Math.max(...ys) - Math.min(...ys) < MIN_BOX_SIZE
+  ) {
+    throw new Error(
+      `box must span at least ${MIN_BOX_SIZE} in width and height`
+    );
+  }
+
   return points;
 }
 
