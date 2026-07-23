@@ -1,19 +1,11 @@
 import { useState } from "react";
-import { Point } from "./geometry";
+import { Point, clampPoint } from "./geometry";
 
 export type DrawMode = "rect" | "polygon";
 
 interface DrawPreview {
   points: Point[];
   closed: boolean;
-}
-
-function clampInt(v: number): number {
-  return Math.min(Math.max(Math.round(v), 0), 200);
-}
-
-function clampPointInt(p: Point): Point {
-  return { x: clampInt(p.x), y: clampInt(p.y) };
 }
 
 function rectCorners(a: Point, b: Point): Point[] {
@@ -65,7 +57,7 @@ export function useStartboxDraw(onComplete: (poly: Point[]) => void) {
   }
 
   function onMouseDown(raw: Point) {
-    const p = clampPointInt(raw);
+    const p = clampPoint(raw);
 
     if (mode === "rect") {
       setRectStart(p);
@@ -95,11 +87,11 @@ export function useStartboxDraw(onComplete: (poly: Point[]) => void) {
   function onMouseMove(raw: Point) {
     if (mode === null) return;
 
-    setCursor(clampPointInt(raw));
+    setCursor(clampPoint(raw));
   }
 
   function onMouseUp(raw: Point) {
-    const p = clampPointInt(raw);
+    const p = clampPoint(raw);
 
     if (mode !== "rect" || rectStart === null) return;
 

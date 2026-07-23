@@ -76,6 +76,8 @@ export default function MapStartbox(props: MapStartboxProps) {
   const draw = useStartboxDraw((poly) =>
     setStartboxes((prev) => prev.add(poly))
   );
+  const drawRef = useRef(draw);
+  drawRef.current = draw;
   const [createAnchor, setCreateAnchor] = useState<HTMLElement | null>(null);
 
   const [deleteStartbox, setDeleteStartbox] = useState<boolean>(false);
@@ -110,12 +112,12 @@ export default function MapStartbox(props: MapStartboxProps) {
   useEffect(() => {
     if (draw.mode === null) return;
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") draw.cancel();
-      else if (e.key === "Enter") draw.commit();
+      if (e.key === "Escape") drawRef.current.cancel();
+      else if (e.key === "Enter") drawRef.current.commit();
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [draw]);
+  }, [draw.mode]);
 
   const changedStartbox =
     initStartboxes.length !== startboxes.boxes.length ||
@@ -164,8 +166,7 @@ export default function MapStartbox(props: MapStartboxProps) {
     event.preventDefault();
     const point = svgPoint(event);
     if (selectedElement.current.type === "vertex") {
-      const vertexIndex = (selectedElement.current as any).vertexIndex;
-      const sbIndex = selectedElement.current.startboxIndex;
+      const { vertexIndex, startboxIndex: sbIndex } = selectedElement.current;
       setStartboxes(
         startboxes.update(sbIndex, (sb) =>
           isRectangle(sb.poly)
@@ -629,17 +630,12 @@ export default function MapStartbox(props: MapStartboxProps) {
                   }}
                   valueLabelDisplay="auto"
                   valueLabelFormat={(v) => formatStrength(snapStrength(v))}
-                  // Pull the absolutely-positioned mark labels (0, 0.5, 1)
-                  // closer to the track so they fit inside the popover's
-                  // content flow. Default is 30px; 23px tucks them right
-                  // beneath the track without overlapping the thumb area.
+                  // Tuck the mark labels under the track (default 30px) to fit the popover.
                   sx={{ "& .MuiSlider-markLabel": { top: "23px" } }}
                 />
               </Stack>
-              {/* Button is a sibling of (not a child of) the Stack so the
-                  Stack's auto-injected margin-top rule (which has higher
-                  CSS specificity than the sx prop on a child) doesn't
-                  override the spacing we want here. */}
+              {/* Sibling of the Stack, not a child, to escape Stack's
+                  auto-injected margin-top that would override this mt. */}
               <Button
                 size="small"
                 variant="outlined"

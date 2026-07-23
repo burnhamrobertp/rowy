@@ -49,17 +49,32 @@ export function isLegacyRect(poly: Point[]): boolean {
   return poly.length === 2;
 }
 
+// Top-left/bottom-right corners if the 4-point poly is an axis-aligned rect,
+// else null.
+function axisAlignedRectCorners(poly: Point[]): [Point, Point] | null {
+  const xs = poly.map((p) => p.x).sort((a, b) => a - b);
+  const ys = poly.map((p) => p.y).sort((a, b) => a - b);
+  if (
+    xs[0] !== xs[1] ||
+    xs[2] !== xs[3] ||
+    ys[0] !== ys[1] ||
+    ys[2] !== ys[3]
+  ) {
+    return null;
+  }
+  return [
+    { x: xs[0], y: ys[0] },
+    { x: xs[3], y: ys[3] },
+  ];
+}
+
 // True when the polygon is an axis-aligned rectangle (the editor should
 // resize it as a rect rather than as free vertices).
 export function isRectangle(poly: Point[]): boolean {
   if (poly.length === 2) return true;
   if (poly.length !== 4) return false;
   if (poly.some((p) => (p.strength ?? 0) > 0)) return false;
-  const xs = [...poly.map((p) => p.x)].sort((a, b) => a - b);
-  const ys = [...poly.map((p) => p.y)].sort((a, b) => a - b);
-  return (
-    xs[0] === xs[1] && xs[2] === xs[3] && ys[0] === ys[1] && ys[2] === ys[3]
-  );
+  return axisAlignedRectCorners(poly) !== null;
 }
 
 // Convert polygon back to 2-point rectangle if it's an axis-aligned rect with
@@ -67,26 +82,13 @@ export function isRectangle(poly: Point[]): boolean {
 export function tryPolygonToRect(poly: Point[]): Point[] {
   if (poly.length !== 4) return poly;
   if (poly.some((p) => (p.strength ?? 0) > 0)) return poly;
-  const xs = poly.map((p) => p.x).sort((a, b) => a - b);
-  const ys = poly.map((p) => p.y).sort((a, b) => a - b);
-  const isRect =
-    xs[0] === xs[1] && xs[2] === xs[3] && ys[0] === ys[1] && ys[2] === ys[3];
-  if (!isRect) return poly;
-  return [
-    { x: xs[0], y: ys[0] },
-    { x: xs[3], y: ys[3] },
-  ];
+  return axisAlignedRectCorners(poly) ?? poly;
 }
 
-// Snap strength to step 0.025, with explicit snap-to-0 below half a step and
-// snap-to-1 above 1 - half a step so map makers don't accidentally keep tiny
-// non-zero strengths or near-1 strengths that aren't quite 1.
-//
-// We round in integer space (multiply, round, divide by the denominator) so
-// the result lands on an exact float value rather than something like
-// 0.30000000000000004 that would otherwise leak from `s / 0.025 * 0.025`.
-export const STRENGTH_STEP = 0.025;
-export const STRENGTH_DENOM = 40; // 1 / STRENGTH_STEP
+// Snapping rounds in integer space (via STRENGTH_DENOM) so results are exact
+// floats, not leaks like 0.30000000000000004, and snaps to 0/1 near the ends.
+export const STRENGTH_DENOM = 40;
+export const STRENGTH_STEP = 1 / STRENGTH_DENOM;
 export const STRENGTH_SNAP_EPSILON = STRENGTH_STEP / 2;
 export function snapStrength(s: number): number {
   if (!isFinite(s)) return 0;
@@ -171,12 +173,8 @@ export function insertionStrength(poly: Point[], i: number): number {
   return snapStrength((s1 + s2) / 2);
 }
 
-// Choose MUI Popover origins so the strength popover projects outward from
-// the polygon — always toward the empty side of the vertex rather than over
-// the rest of the shape. The centroid→vertex vector is the most reliable
-// signal for "which way is outside" because it works for both convex and
-// concave polygons (a concave vertex's chord-midpoint can sit on the wrong
-// side of the boundary, but the centroid is always inside the bulk).
+// Project the popover outward from the polygon via the centroid->vertex
+// direction (reliable for concave shapes, where a chord midpoint isn't).
 export type PopoverOrigin = {
   vertical: "top" | "bottom";
   horizontal: "left" | "right";
