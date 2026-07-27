@@ -39,7 +39,23 @@ export class StartPosState {
     if (!(name in this.positions)) return this;
     const positions = { ...this.positions };
     delete positions[name];
-    return new StartPosState(positions, this.team);
+
+    // Drop refs to the deleted position so a config can't carry a dangling
+    // spawnPoint/baseCenter.
+    const team = this.team.map((t) => ({
+      ...t,
+      sides: t.sides.map((s) => ({
+        starts: s.starts
+          .filter((start) => start.spawnPoint !== name)
+          .map((start) =>
+            start.baseCenter === name
+              ? { ...start, baseCenter: undefined }
+              : start
+          ),
+      })),
+    }));
+
+    return new StartPosState(positions, team);
   }
 
   // Rename a position and update every spawnPoint/baseCenter that referenced it.
