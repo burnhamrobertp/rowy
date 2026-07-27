@@ -28,12 +28,14 @@ export function useMapMeta(
     dimensions: null,
   });
 
+  const parent = column.config?.mapTextureParentTable;
+  const urlField = column.config?.mapTextureUrlPath;
+  const dimField = column.config?.mapDimensionsPath;
+
   useEffect(() => {
     if (!firebaseDb) return;
+    if (parent === undefined || !urlField || !dimField) return;
 
-    const parent = column.config?.mapTextureParentTable || 0;
-    const urlField = column.config?.mapTextureUrlPath || "startboxTextureUrl";
-    const dimField = column.config?.mapDimensionsPath || "dimensions";
     // parent counts how many tables up the texture row lives; 0 = this row.
     const segments = _rowy_ref.path.split("/");
     const path = segments.slice(0, segments.length - parent * 2);
@@ -45,7 +47,7 @@ export function useMapMeta(
         dimensions: parseDimensions(snap.get(dimField)),
       });
     });
-  }, [firebaseDb]);
+  }, [firebaseDb, _rowy_ref.path, parent, urlField, dimField]);
 
   return meta;
 }

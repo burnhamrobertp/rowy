@@ -23,6 +23,11 @@ export const config: IFieldConfig = {
   dataType:
     "{ positions: Record<string, { x: number; y: number }>; team?: any[]; }",
   initialValue: { positions: {} },
+  defaultConfig: {
+    mapTextureParentTable: 0,
+    mapTextureUrlPath: "startboxTextureUrl",
+    mapDimensionsPath: "dimensions",
+  },
   icon: <MapStartPosIcon />,
   description: "Map StartPos",
   TableCell: withRenderTableCell(DisplayCell, SideDrawerField, "popover", {
