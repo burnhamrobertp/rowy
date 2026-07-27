@@ -172,6 +172,14 @@ export default function MapStartPos(props: MapStartPosProps) {
   const activeConfig = configIdx < team.length ? configIdx : 0;
   const config = team[activeConfig];
 
+  const erroredConfigs = Array.from(
+    new Set(
+      Array.from(errorsByConfig.keys())
+        .filter((i) => team[i])
+        .map((i) => configLabel(team[i].teamCount, team[i].playersPerTeam))
+    )
+  );
+
   // For the active config, map each used spawn -> its role/team/slot.
   const spawnUse = new Map<string, SpawnUse>();
   config?.sides.forEach((side, sideIdx) =>
@@ -754,10 +762,19 @@ export default function MapStartPos(props: MapStartPosProps) {
         <Stack spacing={2}>{editorView}</Stack>
       </DialogContent>
       <DialogActions>
+        {erroredConfigs.length > 0 && (
+          <Typography
+            variant="caption"
+            color="error"
+            sx={{ flexGrow: 1, pl: 1 }}
+          >
+            Fix {erroredConfigs.join(", ")} to save
+          </Typography>
+        )}
         <Button onClick={() => props.onClose?.()}>Cancel</Button>
         <Button
           variant="contained"
-          disabled={!dirty}
+          disabled={!dirty || errors.length > 0}
           onClick={() => {
             saveEdits();
             props.onClose?.();
