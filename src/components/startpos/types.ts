@@ -49,3 +49,8 @@ export const POSITION_NAME_RE = /^[a-zA-Z0-9 _.-]+$/;
 
 // dimensions are stored as map units (e.g. "12 x 20"); 1 unit = 512 elmos.
 export const ELMOS_PER_UNIT = 512;
+
+// 2 teams x 1 player -> "1v1"; 3 teams x 2 -> "2v2v2".
+export function configLabel(teamCount: number, playersPerTeam: number): string {
+  return Array.from({ length: teamCount }, () => playersPerTeam).join("v");
+}

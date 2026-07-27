@@ -1,11 +1,10 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import AddLocationAltIcon from "@mui/icons-material/AddLocationAlt";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import CodeIcon from "@mui/icons-material/Code";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
-import FullscreenIcon from "@mui/icons-material/Fullscreen";
-import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
+import FitScreenIcon from "@mui/icons-material/FitScreen";
 import {
   ButtonGroup,
   Tooltip,
@@ -15,6 +14,7 @@ import {
   Dialog,
   DialogTitle,
   DialogContent,
+  DialogActions,
   Stack,
   Popover,
   Button,
@@ -23,6 +23,7 @@ import {
   Tab,
   Typography,
   Paper,
+  Divider,
 } from "@mui/material";
 
 import {
@@ -31,6 +32,7 @@ import {
   Role,
   ROLES,
   POSITION_NAME_RE,
+  configLabel,
 } from "./startpos/types";
 import { MapDimensions, clampToBounds } from "./startpos/geometry";
 import { StartPosState } from "./startpos/state";
@@ -43,9 +45,13 @@ export interface MapStartPosProps {
   startPos: StartPos | unknown;
   updatedStartPos?: (startPos: StartPos) => void;
   editable?: boolean;
+  onClose?: () => void;
 }
 
 const CLICK_DRAG_THRESHOLD = 3;
+const ZOOM_STEP = 1.15;
+const MIN_SPAN = 0.1;
+const MAX_SPAN = 4;
 const SIDE_COLORS = [
   "#2196f3",
   "#ef5350",
@@ -72,22 +78,15 @@ function serialize(sp: StartPos): string {
   return JSON.stringify(saveStartPos(sp));
 }
 
-// 2 teams of 8 -> "8v8"; 3 teams of 2 -> "2v2v2".
-function configLabel(teamCount: number, playersPerTeam: number): string {
-  return Array.from({ length: teamCount }, () => playersPerTeam).join("v");
-}
-
 export default function MapStartPos(props: MapStartPosProps) {
   const { dimensions } = props;
   const W = dimensions.widthElmos;
   const H = dimensions.heightElmos;
-  const portrait = H >= W;
   // Match the in-game render (map_start_position_suggestions.lua): a fixed
   // 300-elmo circle. Name and role share one label size (in elmo units).
   const R = 300;
   const LABEL_SIZE = 110;
 
-  const [dialogOpen, setDialogOpen] = useState(false);
   const initial = useRef(loadStartPos(props.startPos));
   const [state, setState] = useState<StartPosState>(() =>
     StartPosState.fromStartPos(initial.current)
@@ -112,8 +111,58 @@ export default function MapStartPos(props: MapStartPosProps) {
     clientY: number;
   } | null>(null);
 
+  // SVG viewBox drives zoom/pan; fit (the whole map) is 0,0..W,H.
+  const [view, setView] = useState(() => ({ x: 0, y: 0, w: W, h: H }));
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const panning = useRef<{
+    clientX: number;
+    clientY: number;
+    viewX: number;
+    viewY: number;
+    scale: number;
+  } | null>(null);
+  const atFit = view.x === 0 && view.y === 0 && view.w === W && view.h === H;
+
+  // Cursor-anchored wheel zoom, bound natively (so preventDefault holds) via a
+  // ref callback so it re-binds to whichever SVG is mounted (inline/fullscreen).
+  const wheelCleanup = useRef<(() => void) | null>(null);
+  const attachSvg = useCallback(
+    (node: SVGSVGElement | null) => {
+      wheelCleanup.current?.();
+      wheelCleanup.current = null;
+      if (!node || !props.editable) return;
+      const onWheel = (e: WheelEvent) => {
+        e.preventDefault();
+        const ctm = node.getScreenCTM();
+        if (!ctm) return;
+        const px = (e.clientX - ctm.e) / ctm.a;
+        const py = (e.clientY - ctm.f) / ctm.d;
+        const v = viewRef.current;
+        const factor = e.deltaY < 0 ? 1 / ZOOM_STEP : ZOOM_STEP;
+        const span = Math.min(Math.max((v.w / W) * factor, MIN_SPAN), MAX_SPAN);
+        const k = (W * span) / v.w;
+        setView({
+          x: px - (px - v.x) * k,
+          y: py - (py - v.y) * k,
+          w: W * span,
+          h: H * span,
+        });
+      };
+      node.addEventListener("wheel", onWheel, { passive: false });
+      wheelCleanup.current = () => node.removeEventListener("wheel", onWheel);
+    },
+    [props.editable, W, H]
+  );
+
   const positionNames = Object.keys(state.positions);
   const errors = validateStartPos(state.toStartPos());
+  const errorsByConfig = new Map<number, string[]>();
+  errors.forEach((e) => {
+    const list = errorsByConfig.get(e.configIdx) ?? [];
+    list.push(e.message);
+    errorsByConfig.set(e.configIdx, list);
+  });
   const outOfBounds = positionNames.filter((n) => {
     const p = state.positions[n];
     return p.x < 0 || p.x > W || p.y < 0 || p.y > H;
@@ -147,37 +196,23 @@ export default function MapStartPos(props: MapStartPosProps) {
       setConfigIdx(team.length - 1);
   }, [team.length, configIdx]);
 
-  // Auto-persist: debounce writes while editing and flush on unmount (when the
-  // popover / side drawer closes), so changes are never lost for want of a
-  // save click.
-  const lastSavedRef = useRef(serialize(initial.current));
-  const stateRef = useRef(state);
-  stateRef.current = state;
-  const updatedRef = useRef(props.updatedStartPos);
-  updatedRef.current = props.updatedStartPos;
-
   useEffect(() => {
-    if (!props.editable || !props.updatedStartPos) return;
-    const serialized = serialize(state.toStartPos());
-    if (serialized === lastSavedRef.current) return;
-    const id = setTimeout(() => {
-      props.updatedStartPos!(saveStartPos(state.toStartPos()));
-      lastSavedRef.current = serialized;
-    }, 500);
+    setView({ x: 0, y: 0, w: W, h: H });
+  }, [W, H]);
 
-    return () => clearTimeout(id);
-  }, [state, props.editable, props.updatedStartPos]);
-
-  useEffect(
-    () => () => {
-      const fn = updatedRef.current;
-      if (!fn) return;
-      const serialized = serialize(stateRef.current.toStartPos());
-      if (serialized !== lastSavedRef.current)
-        fn(saveStartPos(stateRef.current.toStartPos()));
-    },
-    []
+  // Explicit save, mirroring the startbox editor: edits stay local until the
+  // user saves, so a stray click or drag never mutates the stored data.
+  const [savedSerialized, setSavedSerialized] = useState(() =>
+    serialize(initial.current)
   );
+  const dirty = serialize(state.toStartPos()) !== savedSerialized;
+
+  function saveEdits() {
+    if (!props.updatedStartPos) return;
+    const sp = state.toStartPos();
+    props.updatedStartPos(saveStartPos(sp));
+    setSavedSerialized(serialize(sp));
+  }
 
   function openJson() {
     setJsonDraft(JSON.stringify(saveStartPos(state.toStartPos()), null, 2));
@@ -218,6 +253,15 @@ export default function MapStartPos(props: MapStartPosProps) {
   }
 
   function onMouseMove(event: React.MouseEvent<SVGSVGElement, MouseEvent>) {
+    if (panning.current) {
+      const p = panning.current;
+      setView((v) => ({
+        ...v,
+        x: p.viewX - (event.clientX - p.clientX) / p.scale,
+        y: p.viewY - (event.clientY - p.clientY) / p.scale,
+      }));
+      return;
+    }
     if (pendingClick.current) {
       const dx = event.clientX - pendingClick.current.clientX;
       const dy = event.clientY - pendingClick.current.clientY;
@@ -239,22 +283,41 @@ export default function MapStartPos(props: MapStartPosProps) {
       pendingClick.current = null;
     }
     dragging.current = null;
+    panning.current = null;
+  }
+
+  function onBackgroundMouseDown(
+    event: React.MouseEvent<SVGSVGElement, MouseEvent>
+  ) {
+    if (!props.editable || addMode) return;
+    const ctm = event.currentTarget.getScreenCTM();
+    if (!ctm) return;
+    event.preventDefault();
+    panning.current = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      viewX: view.x,
+      viewY: view.y,
+      scale: ctm.a,
+    };
   }
 
   const mapView = (
     <svg
-      viewBox={`0 0 ${W} ${H}`}
-      preserveAspectRatio="none"
+      ref={attachSvg}
+      viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
+      preserveAspectRatio="xMidYMid meet"
       style={{
         position: "absolute",
         inset: 0,
         width: "100%",
         height: "100%",
-        ...(addMode ? { cursor: "crosshair" } : {}),
+        cursor: addMode ? "crosshair" : props.editable ? "grab" : "default",
       }}
       onMouseLeave={endInteraction}
       onMouseUp={endInteraction}
       onMouseMove={onMouseMove}
+      onMouseDown={onBackgroundMouseDown}
       onClick={onBackgroundClick}
     >
       <image
@@ -362,13 +425,10 @@ export default function MapStartPos(props: MapStartPosProps) {
     </svg>
   );
 
-  // Fullscreen lets a portrait map use the full viewport height; in the side
-  // drawer the map fills the available width (capped so very tall maps scroll).
-  const mapWrapStyle: React.CSSProperties = dialogOpen
-    ? portrait
-      ? { height: "84vh", aspectRatio: `${W} / ${H}`, maxWidth: "100%" }
-      : { width: "100%", aspectRatio: `${W} / ${H}`, maxHeight: "84vh" }
-    : { width: "100%", aspectRatio: `${W} / ${H}`, maxHeight: "74vh" };
+  // Whole-map fit (matching the startbox editor): the SVG letterboxes via
+  // preserveAspectRatio="meet", so the container is just a defined box and the
+  // whole map fits inside it in both axes rather than being cropped or stretched.
+  const mapWrapStyle: React.CSSProperties = { width: "100%", height: "60vh" };
   const mapBox = (
     <div style={{ position: "relative", margin: "0 auto", ...mapWrapStyle }}>
       {mapView}
@@ -376,8 +436,31 @@ export default function MapStartPos(props: MapStartPosProps) {
   );
 
   if (!props.editable) {
+    // In-cell preview: scale to fit the row height (aspect preserved), so a
+    // portrait map fits vertically rather than overflowing from the cell width.
     return (
-      <div style={{ width: "100%", height: "100%", padding: 10 }}>{mapBox}</div>
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          padding: 4,
+          boxSizing: "border-box",
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+        }}
+      >
+        <div
+          style={{
+            position: "relative",
+            height: "100%",
+            aspectRatio: `${W} / ${H}`,
+            maxWidth: "100%",
+          }}
+        >
+          {mapView}
+        </div>
+      </div>
     );
   }
 
@@ -386,145 +469,184 @@ export default function MapStartPos(props: MapStartPosProps) {
 
   const editorView = (
     <>
-      <ButtonGroup variant="outlined" size="small">
-        <Tooltip title="Add position (then click the map)">
-          <span>
-            <IconButton
-              size="small"
-              color={addMode ? "primary" : "default"}
-              onClick={() => {
-                setAddMode(!addMode);
-                setDeleteMode(false);
-              }}
-            >
-              <AddLocationAltIcon />
-            </IconButton>
-          </span>
-        </Tooltip>
-        <Tooltip title="Delete position (then click a marker)">
-          <span>
-            <IconButton
-              size="small"
-              color={deleteMode ? "error" : "default"}
-              disabled={positionNames.length === 0}
-              onClick={() => {
-                setDeleteMode(!deleteMode);
-                setAddMode(false);
-              }}
-            >
-              <DeleteIcon />
-            </IconButton>
-          </span>
-        </Tooltip>
-        <Tooltip title="View / edit raw JSON">
-          <span>
-            <IconButton size="small" onClick={openJson}>
-              <CodeIcon />
-            </IconButton>
-          </span>
-        </Tooltip>
-        <Tooltip title="Fullscreen">
-          <span>
-            <IconButton size="small" onClick={() => setDialogOpen(!dialogOpen)}>
-              {dialogOpen ? <FullscreenExitIcon /> : <FullscreenIcon />}
-            </IconButton>
-          </span>
-        </Tooltip>
-      </ButtonGroup>
-
-      <Stack direction="row" alignItems="center" spacing={1}>
-        <Typography variant="caption" color="text.secondary">
-          Configuration
-        </Typography>
-        {team.length > 0 ? (
-          <Tabs
-            value={activeConfig}
-            onChange={(_, v) => setConfigIdx(v)}
-            variant="scrollable"
-            scrollButtons="auto"
-            sx={{ minHeight: 36, flexGrow: 1 }}
-          >
-            {team.map((t, i) => (
-              <Tab
-                key={i}
-                sx={{ minHeight: 36, py: 0 }}
-                label={configLabel(t.teamCount, t.playersPerTeam)}
-              />
-            ))}
-          </Tabs>
-        ) : (
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            sx={{ flexGrow: 1 }}
-          >
-            none yet
-          </Typography>
-        )}
-        <Button
-          size="small"
-          startIcon={<AddIcon />}
-          onClick={() => {
-            setState(state.addTeam());
-            setConfigIdx(team.length);
-          }}
-        >
-          Add
-        </Button>
-      </Stack>
-
-      {mapBox}
-
-      {config && (
-        <Paper variant="outlined" sx={{ p: 1.5 }}>
-          <Stack direction="row" spacing={1.5} alignItems="center">
-            <TextField
-              type="number"
-              size="small"
-              label="Teams"
-              value={config.teamCount}
-              onChange={(e) =>
-                setState(
-                  state.setTeamCount(activeConfig, Number(e.target.value))
-                )
-              }
-              sx={{ width: 90 }}
-              inputProps={{ min: 1 }}
-            />
-            <TextField
-              type="number"
-              size="small"
-              label="Players / team"
-              value={config.playersPerTeam}
-              onChange={(e) =>
-                setState(
-                  state.setPlayersPerTeam(activeConfig, Number(e.target.value))
-                )
-              }
-              sx={{ width: 120 }}
-              inputProps={{ min: 1 }}
-            />
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ flexGrow: 1 }}
-            >
-              Click a marker to set its team & role
-            </Typography>
-            <Tooltip title="Remove this configuration">
+      <Stack direction="row" spacing={1} alignItems="center">
+        <ButtonGroup variant="outlined" size="small">
+          <Tooltip title="Add position (then click the map)">
+            <span>
               <IconButton
                 size="small"
+                color={addMode ? "primary" : "default"}
                 onClick={() => {
-                  setState(state.removeTeam(activeConfig));
-                  setConfigIdx(Math.max(0, activeConfig - 1));
+                  setAddMode(!addMode);
+                  setDeleteMode(false);
+                }}
+              >
+                <AddLocationAltIcon />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title="Delete position (then click a marker)">
+            <span>
+              <IconButton
+                size="small"
+                color={deleteMode ? "error" : "default"}
+                disabled={positionNames.length === 0}
+                onClick={() => {
+                  setDeleteMode(!deleteMode);
+                  setAddMode(false);
                 }}
               >
                 <DeleteIcon />
               </IconButton>
-            </Tooltip>
+            </span>
+          </Tooltip>
+        </ButtonGroup>
+
+        <ButtonGroup variant="outlined" size="small">
+          <Tooltip title="Reset zoom">
+            <span>
+              <IconButton
+                size="small"
+                disabled={atFit}
+                onClick={() => setView({ x: 0, y: 0, w: W, h: H })}
+              >
+                <FitScreenIcon />
+              </IconButton>
+            </span>
+          </Tooltip>
+        </ButtonGroup>
+
+        <div style={{ flexGrow: 1 }} />
+
+        <ButtonGroup variant="outlined" size="small">
+          <Tooltip title="View / edit raw JSON">
+            <span>
+              <IconButton size="small" onClick={openJson}>
+                <CodeIcon />
+              </IconButton>
+            </span>
+          </Tooltip>
+        </ButtonGroup>
+      </Stack>
+
+      {mapBox}
+
+      <Paper variant="outlined" sx={{ p: 1.5 }}>
+        <Stack spacing={1.5}>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <Typography variant="subtitle2">Configurations</Typography>
+            {team.length > 0 ? (
+              <Tabs
+                value={activeConfig}
+                onChange={(_, v) => setConfigIdx(v)}
+                variant="scrollable"
+                scrollButtons="auto"
+                sx={{ minHeight: 36, flexGrow: 1 }}
+              >
+                {team.map((t, i) => {
+                  const hasErr = (errorsByConfig.get(i)?.length ?? 0) > 0;
+                  return (
+                    <Tab
+                      key={i}
+                      sx={{
+                        minHeight: 36,
+                        py: 0,
+                        ...(hasErr && {
+                          color: "error.main",
+                          "&.Mui-selected": { color: "error.main" },
+                        }),
+                      }}
+                      label={configLabel(t.teamCount, t.playersPerTeam)}
+                    />
+                  );
+                })}
+              </Tabs>
+            ) : (
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ flexGrow: 1 }}
+              >
+                none yet
+              </Typography>
+            )}
+            <Button
+              size="small"
+              startIcon={<AddIcon />}
+              onClick={() => {
+                setState(state.addTeam());
+                setConfigIdx(team.length);
+              }}
+            >
+              Add
+            </Button>
           </Stack>
-        </Paper>
-      )}
+
+          {config && (
+            <>
+              <Divider />
+              <Stack direction="row" spacing={1.5} alignItems="center">
+                <TextField
+                  type="number"
+                  size="small"
+                  label="Teams"
+                  value={config.teamCount}
+                  onChange={(e) =>
+                    setState(
+                      state.setTeamCount(activeConfig, Number(e.target.value))
+                    )
+                  }
+                  sx={{ width: 90 }}
+                  inputProps={{ min: 1 }}
+                />
+                <TextField
+                  type="number"
+                  size="small"
+                  label="Players / team"
+                  value={config.playersPerTeam}
+                  onChange={(e) =>
+                    setState(
+                      state.setPlayersPerTeam(
+                        activeConfig,
+                        Number(e.target.value)
+                      )
+                    )
+                  }
+                  sx={{ width: 120 }}
+                  inputProps={{ min: 1 }}
+                />
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ flexGrow: 1 }}
+                >
+                  Click a marker to set its team & role
+                </Typography>
+                <Tooltip title="Delete this configuration">
+                  <IconButton
+                    size="small"
+                    onClick={() => {
+                      setState(state.removeTeam(activeConfig));
+                      setConfigIdx(Math.max(0, activeConfig - 1));
+                    }}
+                  >
+                    <DeleteIcon />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+              {(errorsByConfig.get(activeConfig)?.length ?? 0) > 0 && (
+                <Alert severity="error" sx={{ "& ul": { m: 0, pl: 2 } }}>
+                  <ul>
+                    {errorsByConfig.get(activeConfig)!.map((e, i) => (
+                      <li key={i}>{e}</li>
+                    ))}
+                  </ul>
+                </Alert>
+              )}
+            </>
+          )}
+        </Stack>
+      </Paper>
 
       <Popover
         open={selected !== null && selectedPos !== null}
@@ -581,16 +703,6 @@ export default function MapStartPos(props: MapStartPosProps) {
         </Alert>
       )}
 
-      {errors.length > 0 && (
-        <Alert severity="warning" sx={{ "& ul": { m: 0, pl: 2 } }}>
-          <ul>
-            {errors.map((e, i) => (
-              <li key={i}>{e}</li>
-            ))}
-          </ul>
-        </Alert>
-      )}
-
       <Dialog
         open={jsonDraft !== null}
         onClose={() => setJsonDraft(null)}
@@ -629,23 +741,32 @@ export default function MapStartPos(props: MapStartPosProps) {
     </>
   );
 
-  if (dialogOpen) {
-    return (
-      <Dialog open fullWidth maxWidth="xl" onClose={() => setDialogOpen(false)}>
-        <DialogTitle>StartPos editor</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} style={{ minHeight: "80vh", width: "100%" }}>
-            {editorView}
-          </Stack>
-        </DialogContent>
-      </Dialog>
-    );
-  }
-
   return (
-    <Stack spacing={2} style={{ padding: 20, minWidth: 520, maxWidth: 760 }}>
-      {editorView}
-    </Stack>
+    <Dialog
+      open
+      onClose={() => props.onClose?.()}
+      fullWidth
+      maxWidth="xl"
+      PaperProps={{ sx: { height: "90vh" } }}
+    >
+      <DialogTitle>Start positions</DialogTitle>
+      <DialogContent dividers>
+        <Stack spacing={2}>{editorView}</Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => props.onClose?.()}>Cancel</Button>
+        <Button
+          variant="contained"
+          disabled={!dirty}
+          onClick={() => {
+            saveEdits();
+            props.onClose?.();
+          }}
+        >
+          Save
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 

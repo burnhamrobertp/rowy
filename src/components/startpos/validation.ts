@@ -1,53 +1,42 @@
-import { StartPos } from "./types";
+import { StartPos, configLabel } from "./types";
 
-// Mirrors the checks in maps-metadata scripts/js/src/check_startpos.ts so map
-// makers see the same errors here rather than at metadata-generation time.
-export function validateStartPos(sp: StartPos): string[] {
-  const errors: string[] = [];
+export interface ConfigError {
+  configIdx: number;
+  message: string;
+}
+
+// Same checks as maps-metadata scripts/js/src/check_startpos.ts, so map makers
+// hit the same problems here rather than at metadata-generation time.
+export function validateStartPos(sp: StartPos): ConfigError[] {
+  const errors: ConfigError[] = [];
   const positionNames = new Set(Object.keys(sp.positions));
   const seenConfs = new Set<string>();
 
   (sp.team || []).forEach((team, ti) => {
-    const label = `Team config ${ti + 1} (${team.teamCount} teams, ${
-      team.playersPerTeam
-    } players)`;
+    const label = configLabel(team.teamCount, team.playersPerTeam);
+    const add = (message: string) => errors.push({ configIdx: ti, message });
 
     const confKey = `${team.teamCount}|${team.playersPerTeam}`;
-    if (seenConfs.has(confKey)) {
-      errors.push(
-        `Duplicate config for ${team.teamCount} teams with ${team.playersPerTeam} players`
-      );
-    }
+    if (seenConfs.has(confKey)) add(`Duplicate ${label} config`);
     seenConfs.add(confKey);
 
-    if (team.teamCount !== team.sides.length) {
-      errors.push(
-        `${label}: has ${team.sides.length} sides but teamCount is ${team.teamCount}`
-      );
-    }
+    if (team.teamCount !== team.sides.length)
+      add(`Needs ${team.teamCount} teams but has ${team.sides.length}`);
 
     team.sides.forEach((side, si) => {
-      if (team.playersPerTeam !== side.starts.length) {
-        errors.push(
-          `${label}: side ${si + 1} has ${
-            side.starts.length
-          } starts but playersPerTeam is ${team.playersPerTeam}`
-        );
-      }
+      const short = team.playersPerTeam - side.starts.length;
+      const n = Math.abs(short);
+      const noun = `start position${n === 1 ? "" : "s"}`;
+      if (short > 0) add(`Team ${si + 1} needs ${n} more ${noun}`);
+      else if (short < 0) add(`Team ${si + 1} has ${n} ${noun} too many`);
+
       side.starts.forEach((start, sti) => {
-        const where = `${label}: side ${si + 1} start ${sti + 1}`;
-        if (!start.spawnPoint) {
-          errors.push(`${where} has no spawn point`);
-        } else if (!positionNames.has(start.spawnPoint)) {
-          errors.push(
-            `${where} uses unknown spawn point "${start.spawnPoint}"`
-          );
-        }
-        if (start.baseCenter && !positionNames.has(start.baseCenter)) {
-          errors.push(
-            `${where} uses unknown base center "${start.baseCenter}"`
-          );
-        }
+        const where = `Team ${si + 1} start ${sti + 1}`;
+        if (!start.spawnPoint) add(`${where} is empty`);
+        else if (!positionNames.has(start.spawnPoint))
+          add(`${where} points to missing position "${start.spawnPoint}"`);
+        if (start.baseCenter && !positionNames.has(start.baseCenter))
+          add(`${where} points to missing base "${start.baseCenter}"`);
       });
     });
   });

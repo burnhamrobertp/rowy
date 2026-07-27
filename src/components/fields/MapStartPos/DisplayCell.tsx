@@ -6,6 +6,7 @@ export default function MapStartPosView({
   value,
   column,
   _rowy_ref,
+  rowHeight,
 }: IDisplayCellProps) {
   const { textureUrl, dimensions } = useMapMeta(_rowy_ref, column);
   if (textureUrl === null) {
@@ -15,11 +16,13 @@ export default function MapStartPosView({
     return <>No map dimensions</>;
   }
   return (
-    <MapStartPos
-      textureUrl={textureUrl}
-      dimensions={dimensions}
-      startPos={value}
-      editable={false}
-    />
+    <div style={{ height: rowHeight, width: "100%" }}>
+      <MapStartPos
+        textureUrl={textureUrl}
+        dimensions={dimensions}
+        startPos={value}
+        editable={false}
+      />
+    </div>
   );
 }
